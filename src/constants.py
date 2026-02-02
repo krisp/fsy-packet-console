@@ -1,7 +1,6 @@
 """Constants and configuration for the radio console."""
 
 # --- Configuration ---
-RADIO_MAC_ADDRESS = "38:D2:00:01:62:C2"
 TNC_TCP_PORT = 8001
 HEARTBEAT_INTERVAL = 10  # seconds
 CONNECTION_TIMEOUT = 30  # seconds

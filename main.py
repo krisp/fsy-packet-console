@@ -48,6 +48,12 @@ if __name__ == "__main__":
         metavar="HOST:PORT",
         help="Connect to KISS-over-TCP TNC (e.g., direwolf.local:8001, 192.168.1.100:8001)",
     )
+    parser.add_argument(
+        "-r",
+        "--radio-mac",
+        metavar="MAC",
+        help="Bluetooth MAC address of radio (BLE mode only, e.g., 38:D2:00:01:62:C2)",
+    )
 
     args = parser.parse_args()
 
@@ -83,4 +89,5 @@ if __name__ == "__main__":
         serial_baud=args.baud,
         tcp_host=tcp_host,
         tcp_port=tcp_port,
+        radio_mac=args.radio_mac,
     )

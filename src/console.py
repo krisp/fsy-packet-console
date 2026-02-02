@@ -998,6 +998,7 @@ class TNCConfig:
             "MYCALL": "NOCALL",
             "MYALIAS": "",
             "MYLOCATION": "",  # Maidenhead grid square (2-10 chars) for manual position
+            "RADIO_MAC": "",  # Bluetooth MAC address for BLE radio (e.g., 38:D2:00:01:62:C2)
             "UNPROTO": "CQ",
             "DIGIPEAT": "OFF",
             "MONITOR": "ON",
@@ -1243,6 +1244,7 @@ class TNCCompleter(Completer):
             "MYCALL": "Set/show my callsign",
             "MYALIAS": "Set/show my alias",
             "MYLOCATION": "Set manual position (Maidenhead grid, e.g., FN31pr)",
+            "RADIO_MAC": "Set Bluetooth MAC address for BLE radio (e.g., 38:D2:00:01:62:C2)",
             "UNPROTO": "Set unproto destination",
             "MONITOR": "Toggle monitor mode",
             "AUTO_ACK": "Auto-acknowledge APRS messages (ON/OFF)",
@@ -6642,7 +6644,8 @@ async def command_loop(radio, auto_tnc=False, auto_connect=None, serial_mode=Fal
 
 
 async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
-               serial_port=None, serial_baud=9600, tcp_host=None, tcp_port=8001):
+               serial_port=None, serial_baud=9600, tcp_host=None, tcp_port=8001,
+               radio_mac=None):
     # Enable debug mode if requested via command line
     if auto_debug:
         constants.DEBUG_LEVEL = 2
@@ -6658,6 +6661,23 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
     transport = None
     client = None
     is_shutting_down = False
+
+    # Load TNC config early to get RADIO_MAC if needed for BLE mode
+    tnc_config_early = None
+    if not serial_port and not tcp_host:
+        # BLE mode - need to determine MAC address
+        tnc_config_early = TNCConfig()
+
+        # Determine MAC address: command-line overrides config
+        if radio_mac:
+            ble_mac = radio_mac
+        elif tnc_config_early.settings.get("RADIO_MAC"):
+            ble_mac = tnc_config_early.settings.get("RADIO_MAC")
+        else:
+            print_error("No radio MAC address configured")
+            print_error("Set via command line: -r/--radio-mac MAC_ADDRESS")
+            print_error("Or in TNC mode: RADIO_MAC 38:D2:00:01:62:C2")
+            return
 
     # Serial mode
     if serial_port:
@@ -6700,13 +6720,14 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
 
     # BLE mode
     else:
-        print_pt(HTML("<gray>Connecting to " + RADIO_MAC_ADDRESS + "...</gray>\n"))
+        print_pt(HTML(f"<gray>Connecting to {ble_mac}...</gray>\n"))
 
         device = await BleakScanner.find_device_by_address(
-            RADIO_MAC_ADDRESS, timeout=10.0
+            ble_mac, timeout=10.0
         )
         if not device:
-            print_error("Device not found")
+            print_error(f"Device not found: {ble_mac}")
+            print_error("Use 'bluetoothctl scan on' to find your radio's MAC address")
             return
 
         print_info(f"Found: {device.name}")
@@ -6752,6 +6773,14 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
             from src.transport import BLETransport
             transport = BLETransport(client, rx_queue, tnc_queue)
 
+            # Auto-save the working MAC address to config (if different or not set)
+            if tnc_config_early:
+                stored_mac = tnc_config_early.settings.get("RADIO_MAC")
+                if stored_mac != ble_mac:
+                    print_info(f"Saving radio MAC {ble_mac} to config")
+                    tnc_config_early.set("RADIO_MAC", ble_mac)
+                    tnc_config_early.save()
+
         except Exception as e:
             print_error(f"BLE connection failed: {e}")
             return
@@ -6764,7 +6793,8 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
         # This prevents the two-adapter conflict where one sets _pending_connect
         # but the other receives the UA frames
 
-        tnc_config = TNCConfig()
+        # Reuse the config from BLE setup if available, otherwise create new one
+        tnc_config = tnc_config_early if tnc_config_early else TNCConfig()
         shared_ax25 = AX25Adapter(
             radio,
             get_mycall=lambda: tnc_config.get("MYCALL"),
@@ -6928,7 +6958,8 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
 
 
 def run(auto_tnc=False, auto_connect=None, auto_debug=False,
-        serial_port=None, serial_baud=9600, tcp_host=None, tcp_port=8001):
+        serial_port=None, serial_baud=9600, tcp_host=None, tcp_port=8001,
+        radio_mac=None):
     """Entry point for the console application."""
     try:
         asyncio.run(
@@ -6940,6 +6971,7 @@ def run(auto_tnc=False, auto_connect=None, auto_debug=False,
                 serial_baud=serial_baud,
                 tcp_host=tcp_host,
                 tcp_port=tcp_port,
+                radio_mac=radio_mac,
             )
         )
     except KeyboardInterrupt:

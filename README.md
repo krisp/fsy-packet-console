@@ -532,7 +532,7 @@ pip install bleak prompt-toolkit aiohttp pyserial-asyncio
 
 **Note:** APRS parsing is implemented natively - no external APRS library needed!
 
-### 4. Configure (BLE Mode Only)
+### 4. Configure Bluetooth Radio (BLE Mode Only)
 
 Find your UV-50PRO's Bluetooth MAC address:
 
@@ -548,10 +548,24 @@ scan on
 system_profiler SPBluetoothDataType | grep -A 5 "UV-50PRO"
 ```
 
-**Edit `src/constants.py`:**
-```python
-RADIO_MAC_ADDRESS = "38:D2:00:01:62:C2"  # Your UV-50PRO MAC
+**Configure the MAC address** (choose one method):
+
+**Option 1: Command line** (temporary, for testing):
+```bash
+python main.py -r 38:D2:00:01:62:C2
+# or
+python main.py --radio-mac 38:D2:00:01:62:C2
 ```
+
+**Option 2: TNC configuration** (permanent):
+```bash
+python main.py
+aprs> tnc                        # Enter TNC mode
+tnc> RADIO_MAC 38:D2:00:01:62:C2 # Set your radio's MAC address
+tnc> aprs                        # Return to APRS mode
+```
+
+The MAC address is saved to `~/.tnc_config.json` and will be used on subsequent runs.
 
 ---
 
@@ -604,8 +618,19 @@ Available serial ports:
 
 ### BLE Mode (UV-50PRO Radio)
 
+**First time setup** - configure your radio's MAC address:
 ```bash
 python main.py
+aprs> tnc
+tnc> RADIO_MAC 38:D2:00:01:62:C2   # Use your radio's actual MAC
+tnc> aprs
+```
+
+**Subsequent runs:**
+```bash
+python main.py              # Uses saved MAC from config
+# or
+python main.py -r 38:D2:00:01:62:C2   # Override with command line
 ```
 
 The console will:
@@ -1116,8 +1141,9 @@ See [LICENSE](LICENSE) file for full legal text.
 ### "Device not found" (BLE mode)
 - Ensure UV-50PRO is powered on and in range
 - Check Bluetooth is enabled on computer
-- Verify MAC address in `src/constants.py`
-- Try `bluetoothctl scan on` to find device
+- Verify MAC address is configured: `tnc> RADIO_MAC 38:D2:00:01:62:C2`
+- Or use command line: `python main.py -r 38:D2:00:01:62:C2`
+- Try `bluetoothctl scan on` to find your radio's MAC address
 
 ### "Connection refused" (TCP mode)
 - Verify Direwolf is running: `ps aux | grep direwolf`
