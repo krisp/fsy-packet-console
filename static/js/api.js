@@ -89,13 +89,15 @@ export class APRSApi {
     /**
      * Connect to Server-Sent Events stream for real-time updates
      * @param {Function} onEvent - Callback function(eventType, data)
+     * @param {Function} onConnectionChange - Callback function(status) where status is 'connected', 'disconnected', or 'reconnecting'
      * @returns {EventSource} EventSource instance
      */
-    connectSSE(onEvent) {
+    connectSSE(onEvent, onConnectionChange = null) {
         const eventSource = new EventSource(`${this.baseUrl}/api/events`);
 
         eventSource.addEventListener('connected', (e) => {
             console.log('SSE connected:', e.data);
+            if (onConnectionChange) onConnectionChange('connected');
         });
 
         eventSource.addEventListener('station_update', (e) => {
@@ -110,8 +112,24 @@ export class APRSApi {
             onEvent('message_received', JSON.parse(e.data));
         });
 
+        eventSource.addEventListener('gps_update', (e) => {
+            onEvent('gps_update', JSON.parse(e.data));
+        });
+
+        eventSource.onopen = (e) => {
+            console.log('SSE connection opened');
+            if (onConnectionChange) onConnectionChange('connected');
+        };
+
         eventSource.onerror = (e) => {
             console.error('SSE error:', e);
+
+            // Check if connection is actually closed
+            if (eventSource.readyState === EventSource.CLOSED) {
+                console.warn('SSE connection closed');
+                if (onConnectionChange) onConnectionChange('disconnected');
+            }
+
             onEvent('error', { message: 'SSE connection error' });
         };
 

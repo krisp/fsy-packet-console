@@ -74,6 +74,20 @@ header h1 {
     color: #ff4444;
 }
 
+.status-reconnecting {
+    color: #ffa500;
+    animation: pulse-reconnect 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-reconnect {
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.5;
+    }
+}
+
 .status-clickable {
     cursor: pointer;
     text-decoration: underline;

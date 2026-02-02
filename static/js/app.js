@@ -469,22 +469,66 @@ class APRSApp {
      * Connect to Server-Sent Events for real-time updates
      */
     connectRealtime() {
-        try {
-            this.sse = this.api.connectSSE((type, data) => {
-                this.handleRealtimeUpdate(type, data);
-            });
+        // Initialize reconnection state if not exists
+        if (!this.reconnectAttempts) this.reconnectAttempts = 0;
+        if (!this.maxReconnectDelay) this.maxReconnectDelay = 30000; // Max 30 seconds
+        if (!this.baseReconnectDelay) this.baseReconnectDelay = 1000; // Start at 1 second
 
-            // Update connection status
-            this.setConnectionStatus(true);
+        try {
+            // Close existing connection if any
+            if (this.sse) {
+                this.sse.close();
+                this.sse = null;
+            }
+
+            this.sse = this.api.connectSSE(
+                // Event handler
+                (type, data) => {
+                    this.handleRealtimeUpdate(type, data);
+                },
+                // Connection status handler
+                (status) => {
+                    if (status === 'connected') {
+                        // Reset reconnection counter on successful connection
+                        this.reconnectAttempts = 0;
+                        this.setConnectionStatus('connected');
+                    } else if (status === 'disconnected') {
+                        this.setConnectionStatus('disconnected');
+                        this.scheduleReconnect();
+                    }
+                }
+            );
 
             console.log('Connected to real-time updates');
         } catch (error) {
             console.error('Failed to connect SSE:', error);
-            this.setConnectionStatus(false);
-
-            // Retry connection after 5 seconds
-            setTimeout(() => this.connectRealtime(), 5000);
+            this.setConnectionStatus('disconnected');
+            this.scheduleReconnect();
         }
+    }
+
+    /**
+     * Schedule reconnection with exponential backoff
+     */
+    scheduleReconnect() {
+        if (this.reconnectTimeout) {
+            clearTimeout(this.reconnectTimeout);
+        }
+
+        this.reconnectAttempts++;
+
+        // Calculate delay with exponential backoff
+        const delay = Math.min(
+            this.baseReconnectDelay * Math.pow(2, this.reconnectAttempts - 1),
+            this.maxReconnectDelay
+        );
+
+        console.log(`Reconnecting in ${delay/1000}s (attempt ${this.reconnectAttempts})...`);
+        this.setConnectionStatus('reconnecting', delay);
+
+        this.reconnectTimeout = setTimeout(() => {
+            this.connectRealtime();
+        }, delay);
     }
 
     /**
@@ -649,18 +693,48 @@ class APRSApp {
 
     /**
      * Set connection status indicator
-     * @param {boolean} connected - Connection state
+     * @param {string} status - Connection state: 'connected', 'disconnected', or 'reconnecting'
+     * @param {number} delay - Reconnection delay in ms (only for 'reconnecting' status)
      */
-    setConnectionStatus(connected) {
+    setConnectionStatus(status, delay = 0) {
         const statusEl = document.getElementById('connection-status');
-        if (statusEl) {
-            if (connected) {
-                statusEl.textContent = 'Connected';
-                statusEl.className = 'status-item status-connected';
-            } else {
-                statusEl.textContent = 'Disconnected';
-                statusEl.className = 'status-item status-disconnected';
-            }
+        if (!statusEl) return;
+
+        // Clear any existing countdown interval
+        if (this.statusCountdownInterval) {
+            clearInterval(this.statusCountdownInterval);
+            this.statusCountdownInterval = null;
+        }
+
+        if (status === 'connected' || status === true) {
+            statusEl.textContent = 'Connected';
+            statusEl.className = 'status-item status-connected';
+            statusEl.title = 'Real-time updates active';
+        } else if (status === 'reconnecting') {
+            const delaySeconds = Math.ceil(delay / 1000);
+            let remainingSeconds = delaySeconds;
+
+            // Update immediately
+            statusEl.textContent = `Reconnecting (${remainingSeconds}s)...`;
+            statusEl.className = 'status-item status-reconnecting';
+            statusEl.title = `Attempt ${this.reconnectAttempts}, retrying in ${remainingSeconds}s`;
+
+            // Start countdown
+            this.statusCountdownInterval = setInterval(() => {
+                remainingSeconds--;
+                if (remainingSeconds > 0) {
+                    statusEl.textContent = `Reconnecting (${remainingSeconds}s)...`;
+                    statusEl.title = `Attempt ${this.reconnectAttempts}, retrying in ${remainingSeconds}s`;
+                } else {
+                    statusEl.textContent = 'Reconnecting...';
+                    statusEl.title = `Attempting to reconnect (attempt ${this.reconnectAttempts})`;
+                }
+            }, 1000);
+        } else {
+            // 'disconnected' or false
+            statusEl.textContent = 'Disconnected';
+            statusEl.className = 'status-item status-disconnected';
+            statusEl.title = 'Real-time updates unavailable';
         }
     }
 

@@ -581,66 +581,130 @@ class WeatherMapApp {
     }
 
     /**
-     * Generate temperature line chart HTML
+     * Generate temperature line chart HTML with proper axes
      */
-    generateTemperatureChart(history, useMetric) {
+    generateTemperatureChart(history, useMetric, currentTemp) {
         if (!history || history.length === 0) {
             return '<div style="color: #999; font-size: 11px;">No temperature data</div>';
         }
 
-        // Filter history with valid temperatures
+        // Filter history with valid temperatures and timestamps
         const tempData = history
-            .filter(h => h.temperature !== null && h.temperature !== undefined)
+            .filter(h => h.temperature !== null && h.temperature !== undefined && h.timestamp)
             .slice(-12); // Last 12 samples
 
         if (tempData.length === 0) {
             return '<div style="color: #999; font-size: 11px;">No temperature data</div>';
         }
 
-        // Convert to desired unit
+        // Chart dimensions with margins for axes
+        const totalWidth = 200;
+        const totalHeight = 120;
+        const marginLeft = 35;
+        const marginRight = 10;
+        const marginTop = 10;
+        const marginBottom = 25;
+        const plotWidth = totalWidth - marginLeft - marginRight;
+        const plotHeight = totalHeight - marginTop - marginBottom;
+
+        // Convert temperatures to desired unit
         const temps = tempData.map(h => useMetric
             ? this.renderer.fahrenheitToCelsius(h.temperature)
             : h.temperature
         );
 
+        // Calculate temperature range with padding
         const minTemp = Math.min(...temps);
         const maxTemp = Math.max(...temps);
-        const range = maxTemp - minTemp || 1;
+        const tempPadding = (maxTemp - minTemp) * 0.1 || 1;
+        const yMin = Math.floor(minTemp - tempPadding);
+        const yMax = Math.ceil(maxTemp + tempPadding);
+        const yRange = yMax - yMin;
 
-        const chartHeight = 60;
-        const chartWidth = 200;
-        const pointSpacing = chartWidth / (temps.length - 1 || 1);
+        // Start SVG
+        let svg = `<svg width="${totalWidth}" height="${totalHeight}" style="font-family: Arial, sans-serif; font-size: 9px;">`;
 
-        let svg = `<svg width="${chartWidth}" height="${chartHeight + 20}" style="font-family: monospace; font-size: 10px;">`;
+        // Draw background grid
+        svg += `<rect x="${marginLeft}" y="${marginTop}" width="${plotWidth}" height="${plotHeight}" fill="#f8f8f8" stroke="#ddd"/>`;
 
-        // Build polyline points
+        // Draw horizontal grid lines (temperature)
+        const numYTicks = 5;
+        for (let i = 0; i <= numYTicks; i++) {
+            const temp = yMin + (yRange * i / numYTicks);
+            const y = marginTop + plotHeight - (plotHeight * i / numYTicks);
+
+            // Grid line
+            svg += `<line x1="${marginLeft}" y1="${y}" x2="${marginLeft + plotWidth}" y2="${y}" stroke="#ddd" stroke-width="0.5"/>`;
+
+            // Y-axis label
+            svg += `<text x="${marginLeft - 5}" y="${y + 3}" text-anchor="end" fill="#666">${Math.round(temp)}°</text>`;
+        }
+
+        // Draw Y-axis
+        svg += `<line x1="${marginLeft}" y1="${marginTop}" x2="${marginLeft}" y2="${marginTop + plotHeight}" stroke="#333" stroke-width="1"/>`;
+
+        // Draw X-axis
+        svg += `<line x1="${marginLeft}" y1="${marginTop + plotHeight}" x2="${marginLeft + plotWidth}" y2="${marginTop + plotHeight}" stroke="#333" stroke-width="1"/>`;
+
+        // Build line points
         const points = temps.map((temp, i) => {
-            const x = i * pointSpacing;
-            const y = chartHeight - ((temp - minTemp) / range) * chartHeight;
+            const x = marginLeft + (plotWidth * i / (temps.length - 1 || 1));
+            const y = marginTop + plotHeight - ((temp - yMin) / yRange) * plotHeight;
             return `${x},${y}`;
         }).join(' ');
 
         // Draw line
-        svg += `<polyline points="${points}" fill="none" stroke="#00aaff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
+        svg += `<polyline points="${points}" fill="none" stroke="#0066cc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
 
-        // Draw dots at each point
+        // Draw points
         temps.forEach((temp, i) => {
-            const x = i * pointSpacing;
-            const y = chartHeight - ((temp - minTemp) / range) * chartHeight;
-            svg += `<circle cx="${x}" cy="${y}" r="3" fill="#00aaff"/>`;
+            const x = marginLeft + (plotWidth * i / (temps.length - 1 || 1));
+            const y = marginTop + plotHeight - ((temp - yMin) / yRange) * plotHeight;
+
+            // Point circle
+            svg += `<circle cx="${x}" cy="${y}" r="3" fill="#0066cc" stroke="white" stroke-width="1"/>`;
         });
 
-        // Draw labels
-        svg += `<text x="0" y="${chartHeight + 15}" fill="#999">${Math.round(minTemp)}°</text>`;
-        svg += `<text x="${chartWidth - 20}" y="${chartHeight + 15}" fill="#999">${Math.round(maxTemp)}°</text>`;
-        svg += `<text x="${chartWidth / 2 - 15}" y="10" fill="#003399" font-weight="bold">${Math.round(temps[temps.length - 1])}°</text>`;
+        // Show current temperature indicator on the right side (if provided)
+        if (currentTemp !== null && currentTemp !== undefined) {
+            const displayTemp = useMetric
+                ? this.renderer.fahrenheitToCelsius(currentTemp)
+                : currentTemp;
+
+            // Position at right edge of plot area
+            const currentX = marginLeft + plotWidth;
+            const currentY = marginTop + plotHeight - ((displayTemp - yMin) / yRange) * plotHeight;
+
+            // Highlight circle
+            svg += `<circle cx="${currentX}" cy="${currentY}" r="4" fill="none" stroke="#ff6600" stroke-width="2"/>`;
+            svg += `<circle cx="${currentX}" cy="${currentY}" r="2" fill="#ff6600"/>`;
+
+            // Label
+            svg += `<text x="${currentX}" y="${currentY - 10}" text-anchor="end" fill="#ff6600" font-weight="bold" font-size="10px">${Math.round(displayTemp)}°</text>`;
+        }
+
+        // X-axis labels (time)
+        const numXTicks = Math.min(4, tempData.length);
+        for (let i = 0; i < numXTicks; i++) {
+            const idx = Math.floor((tempData.length - 1) * i / (numXTicks - 1 || 1));
+            const timestamp = tempData[idx].timestamp;
+            const date = new Date(timestamp);
+            const timeStr = date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+
+            const x = marginLeft + (plotWidth * idx / (temps.length - 1 || 1));
+            svg += `<text x="${x}" y="${marginTop + plotHeight + 15}" text-anchor="middle" fill="#666" font-size="8px">${timeStr}</text>`;
+        }
+
+        // Y-axis label
+        const unit = useMetric ? '°C' : '°F';
+        svg += `<text x="${marginLeft / 2}" y="${marginTop + plotHeight / 2}" text-anchor="middle" fill="#333" font-weight="bold" transform="rotate(-90 ${marginLeft / 2} ${marginTop + plotHeight / 2})">${unit}</text>`;
 
         svg += '</svg>';
         return svg;
     }
 
     /**
-     * Generate wind rose HTML
+     * Generate professional meteorological wind rose
      */
     generateWindRose(history) {
         if (!history || history.length === 0) {
@@ -657,57 +721,137 @@ class WeatherMapApp {
             return '<div style="color: #999; font-size: 11px;">No wind data</div>';
         }
 
-        // Calculate wind distribution by sector (8 directions)
-        const sectors = {
-            'N': { count: 0, totalSpeed: 0 },
-            'NE': { count: 0, totalSpeed: 0 },
-            'E': { count: 0, totalSpeed: 0 },
-            'SE': { count: 0, totalSpeed: 0 },
-            'S': { count: 0, totalSpeed: 0 },
-            'SW': { count: 0, totalSpeed: 0 },
-            'W': { count: 0, totalSpeed: 0 },
-            'NW': { count: 0, totalSpeed: 0 }
-        };
+        // Define speed ranges (mph) and colors
+        const speedRanges = [
+            { min: 0, max: 5, color: '#d4f1f4', label: '0-5' },
+            { min: 5, max: 10, color: '#75e6da', label: '5-10' },
+            { min: 10, max: 15, color: '#189ab4', label: '10-15' },
+            { min: 15, max: 25, color: '#05445e', label: '15-25' },
+            { min: 25, max: 999, color: '#1a1a2e', label: '25+' }
+        ];
 
+        // 8 directional sectors
         const dirNames = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+        const numDirections = 8;
 
-        windData.forEach(w => {
-            const dir = Math.round(w.wind_direction / 45) % 8;
-            const sectorName = dirNames[dir];
-            sectors[sectorName].count++;
-            sectors[sectorName].totalSpeed += w.wind_speed;
+        // Initialize data structure: direction -> speed range -> count
+        const sectors = {};
+        dirNames.forEach(dir => {
+            sectors[dir] = speedRanges.map(() => 0);
         });
 
-        const maxCount = Math.max(...Object.values(sectors).map(s => s.count));
-        const size = 100;
-        const center = size / 2;
-        const maxRadius = 35;
+        // Categorize each wind sample
+        windData.forEach(w => {
+            const dirIndex = Math.round(w.wind_direction / 45) % 8;
+            const dirName = dirNames[dirIndex];
 
-        let svg = `<svg width="${size}" height="${size}" style="font-family: monospace; font-size: 9px;">`;
-
-        // Draw center circle
-        svg += `<circle cx="${center}" cy="${center}" r="3" fill="#003399"/>`;
-
-        // Draw sectors
-        dirNames.forEach((dir, i) => {
-            const angle = (i * 45 - 90) * Math.PI / 180; // -90 to start at North
-            const count = sectors[dir].count;
-            const radius = (count / maxCount) * maxRadius;
-
-            if (count > 0) {
-                const x = center + radius * Math.cos(angle);
-                const y = center + radius * Math.sin(angle);
-
-                // Draw line
-                svg += `<line x1="${center}" y1="${center}" x2="${x}" y2="${y}" stroke="#00aaff" stroke-width="2"/>`;
-
-                // Draw text label
-                const textX = center + (maxRadius + 10) * Math.cos(angle);
-                const textY = center + (maxRadius + 10) * Math.sin(angle);
-                const avgSpeed = Math.round(sectors[dir].totalSpeed / count);
-                svg += `<text x="${textX}" y="${textY}" text-anchor="middle" fill="#003399">${dir}${count > 0 ? ` ${avgSpeed}` : ''}</text>`;
+            // Find which speed range this belongs to
+            const rangeIndex = speedRanges.findIndex(r => w.wind_speed >= r.min && w.wind_speed < r.max);
+            if (rangeIndex >= 0) {
+                sectors[dirName][rangeIndex]++;
             }
         });
+
+        // Calculate maximum frequency for scaling
+        let maxFrequency = 0;
+        dirNames.forEach(dir => {
+            const totalForDir = sectors[dir].reduce((sum, count) => sum + count, 0);
+            if (totalForDir > maxFrequency) maxFrequency = totalForDir;
+        });
+
+        if (maxFrequency === 0) {
+            return '<div style="color: #999; font-size: 11px;">No wind data</div>';
+        }
+
+        // Chart dimensions
+        const size = 180;
+        const center = size / 2;
+        const maxRadius = 65;
+        const innerRadius = 5;
+
+        let svg = `<svg width="${size}" height="${size + 40}" style="font-family: Arial, sans-serif; font-size: 8px;">`;
+
+        // Draw concentric circles (frequency rings)
+        const numRings = 4;
+        for (let i = 1; i <= numRings; i++) {
+            const radius = innerRadius + (maxRadius - innerRadius) * (i / numRings);
+            svg += `<circle cx="${center}" cy="${center}" r="${radius}" fill="none" stroke="#ddd" stroke-width="0.5"/>`;
+
+            // Label showing percentage
+            const pct = Math.round((i / numRings) * 100);
+            svg += `<text x="${center + radius + 2}" y="${center - 2}" fill="#999" font-size="7px">${pct}%</text>`;
+        }
+
+        // Draw radial lines for each direction
+        dirNames.forEach((dir, i) => {
+            const angle = (i * 45 - 90) * Math.PI / 180;
+            const x = center + maxRadius * Math.cos(angle);
+            const y = center + maxRadius * Math.sin(angle);
+            svg += `<line x1="${center}" y1="${center}" x2="${x}" y2="${y}" stroke="#ddd" stroke-width="0.5"/>`;
+        });
+
+        // Draw wedges for each direction
+        dirNames.forEach((dir, dirIndex) => {
+            const baseAngle = (dirIndex * 45 - 90) * Math.PI / 180;
+            const wedgeWidth = (45 * Math.PI / 180); // 45 degrees in radians
+
+            // Calculate cumulative frequencies for stacking
+            let cumulativeRadius = innerRadius;
+
+            for (let rangeIndex = 0; rangeIndex < speedRanges.length; rangeIndex++) {
+                const count = sectors[dir][rangeIndex];
+                if (count === 0) continue;
+
+                // Calculate how much of the max radius this segment should use
+                const frequency = count / maxFrequency;
+                const segmentHeight = frequency * (maxRadius - innerRadius);
+                const outerRadius = cumulativeRadius + segmentHeight;
+
+                // Draw wedge segment as a path
+                const startAngle = baseAngle - wedgeWidth / 2;
+                const endAngle = baseAngle + wedgeWidth / 2;
+
+                // Calculate arc path
+                const x1Inner = center + cumulativeRadius * Math.cos(startAngle);
+                const y1Inner = center + cumulativeRadius * Math.sin(startAngle);
+                const x2Inner = center + cumulativeRadius * Math.cos(endAngle);
+                const y2Inner = center + cumulativeRadius * Math.sin(endAngle);
+                const x1Outer = center + outerRadius * Math.cos(startAngle);
+                const y1Outer = center + outerRadius * Math.sin(startAngle);
+                const x2Outer = center + outerRadius * Math.cos(endAngle);
+                const y2Outer = center + outerRadius * Math.sin(endAngle);
+
+                svg += `<path d="M ${x1Inner} ${y1Inner} L ${x1Outer} ${y1Outer} A ${outerRadius} ${outerRadius} 0 0 1 ${x2Outer} ${y2Outer} L ${x2Inner} ${y2Inner} A ${cumulativeRadius} ${cumulativeRadius} 0 0 0 ${x1Inner} ${y1Inner}" fill="${speedRanges[rangeIndex].color}" stroke="white" stroke-width="0.5"/>`;
+
+                cumulativeRadius = outerRadius;
+            }
+        });
+
+        // Draw direction labels
+        dirNames.forEach((dir, i) => {
+            const angle = (i * 45 - 90) * Math.PI / 180;
+            const labelRadius = maxRadius + 15;
+            const x = center + labelRadius * Math.cos(angle);
+            const y = center + labelRadius * Math.sin(angle) + 3;
+
+            svg += `<text x="${x}" y="${y}" text-anchor="middle" fill="#333" font-weight="bold" font-size="10px">${dir}</text>`;
+        });
+
+        // Draw center circle
+        svg += `<circle cx="${center}" cy="${center}" r="${innerRadius}" fill="white" stroke="#333" stroke-width="1"/>`;
+
+        // Draw legend
+        const legendY = size + 5;
+        const legendX = 10;
+        let legendHtml = '';
+
+        speedRanges.forEach((range, i) => {
+            const x = legendX + i * 34;
+            svg += `<rect x="${x}" y="${legendY}" width="12" height="8" fill="${range.color}" stroke="#999" stroke-width="0.5"/>`;
+            svg += `<text x="${x + 14}" y="${legendY + 7}" fill="#333" font-size="7px">${range.label}</text>`;
+        });
+
+        svg += `<text x="${center}" y="${legendY + 22}" text-anchor="middle" fill="#666" font-size="7px">Wind Speed (mph)</text>`;
 
         svg += '</svg>';
         return svg;
@@ -788,7 +932,7 @@ class WeatherMapApp {
         }
 
         // Generate visualizations
-        const tempChart = this.generateTemperatureChart(weatherHistory, useMetric);
+        const tempChart = this.generateTemperatureChart(weatherHistory, useMetric, weather.temperature);
         const windRose = this.generateWindRose(weatherHistory);
 
         // Build popup content with two-column layout
