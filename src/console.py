@@ -1311,7 +1311,7 @@ class CommandCompleter(Completer):
             # Mode-specific filtering
             if self.command_processor.console_mode == "aprs":
                 # APRS mode: add APRS subcommands as top-level, hide radio commands
-                aprs_subcommands = ["message", "station", "wx", "beacon"]
+                aprs_subcommands = ["message", "station", "wx"]
                 commands = sorted(set(commands + aprs_subcommands))
 
                 # Hide radio-specific commands (keep "radio" for mode switching if BLE)
@@ -1537,8 +1537,8 @@ class CommandCompleter(Completer):
                                     )
 
             # APRS subcommands as top-level commands (in APRS mode)
-            # Handle "message ?", "beacon ?", etc. when used without "aprs" prefix
-            elif self.command_processor.console_mode == "aprs" and first_word in ("message", "msg", "beacon", "station", "wx", "weather"):
+            # Handle "message ?", "station ?", etc. when used without "aprs" prefix
+            elif self.command_processor.console_mode == "aprs" and first_word in ("message", "msg", "station", "wx", "weather"):
                 # Redirect to the same logic as "aprs <subcommand>"
                 # Treat first_word as if it were the second word after "aprs"
                 subcmd = first_word
@@ -1613,26 +1613,6 @@ class CommandCompleter(Completer):
                                             display=option,
                                             display_meta=meta,
                                         )
-
-                elif subcmd == "beacon":
-                    if len(words) == 1 or (len(words) == 2 and not text.endswith(" ")):
-                        # Complete beacon actions
-                        actions = ["now", "start", "stop", "status"]
-                        word = words[1] if len(words) == 2 else ""
-                        for action in actions:
-                            if action.startswith(word):
-                                meta = {
-                                    "now": "Send position beacon immediately",
-                                    "start": "Start automatic beaconing",
-                                    "stop": "Stop automatic beaconing",
-                                    "status": "Show beacon status",
-                                }.get(action, "")
-                                yield Completion(
-                                    action,
-                                    start_position=-len(word),
-                                    display=action,
-                                    display_meta=meta,
-                                )
 
                 elif subcmd == "station":
                     if len(words) == 1 or (len(words) == 2 and not text.endswith(" ")):
@@ -1821,7 +1801,6 @@ class CommandCompleter(Completer):
             "message": "APRS messaging",
             "station": "Station database",
             "wx": "Weather stations",
-            "beacon": "Position beaconing",
         }
         return help_text.get(cmd, "")
 
@@ -2034,7 +2013,7 @@ class CommandProcessor:
             # - Radio commands need "radio" prefix (if not in serial mode)
 
             # Check if it's an APRS subcommand without prefix
-            aprs_subcommands = ["message", "station", "wx", "beacon"]
+            aprs_subcommands = ["message", "station", "wx"]
             if cmd in aprs_subcommands:
                 # Rewrite as "aprs <subcommand> ..."
                 cmd = "aprs"
