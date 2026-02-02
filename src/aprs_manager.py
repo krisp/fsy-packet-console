@@ -1,0 +1,4146 @@
+"""APRS Message and Weather Tracking Manager.
+
+Tracks APRS messages sent to our station and weather reports from other stations.
+"""
+
+import asyncio
+import gzip
+import hashlib
+import json
+import math
+import os
+import re
+import time
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Tuple
+
+import src.constants as constants
+from src.device_id import get_device_identifier
+from src.utils import print_debug, print_error, print_info
+
+# Message retry configuration
+MESSAGE_RETRY_TIMEOUT = 30  # DEPRECATED: Use fast/slow timeouts instead
+MESSAGE_RETRY_FAST = 20  # seconds between fast retry attempts (not digipeated)
+MESSAGE_RETRY_SLOW = 600  # seconds between slow retry attempts (digipeated but not ACKed) - 10 minutes
+MESSAGE_MAX_RETRIES = (
+    3  # maximum number of transmission attempts (original + 2 retries)
+)
+
+# Duplicate packet suppression configuration
+DUPLICATE_WINDOW = 30  # seconds to track packet duplicates
+
+
+@dataclass
+class APRSMessage:
+    """Represents an APRS message."""
+
+    timestamp: datetime
+    from_call: str
+    to_call: str
+    message: str
+    message_id: Optional[str] = None
+    direction: str = "received"  # 'sent' or 'received'
+    digipeated: bool = False  # Only relevant for sent messages - true if heard digipeated
+    ack_received: bool = False  # Only relevant for sent messages - true if ACK received
+    failed: bool = (
+        False  # Only relevant for sent messages - true if max retries exceeded
+    )
+    retry_count: int = 0  # Number of retries attempted
+    last_sent: Optional[datetime] = (
+        None  # Timestamp of last transmission attempt
+    )
+    read: bool = False  # Only relevant for received messages
+
+
+@dataclass
+class APRSPosition:
+    """Represents an APRS position report."""
+
+    timestamp: datetime
+    station: str
+    latitude: float  # Decimal degrees
+    longitude: float  # Decimal degrees
+    altitude: Optional[float] = None  # Feet
+    symbol_table: str = "/"
+    symbol_code: str = ">"
+    comment: str = ""
+    grid_square: str = ""  # Maidenhead grid square
+    device: Optional[str] = None  # Device/radio type (e.g., "Yaesu FTM-400DR")
+
+
+@dataclass
+class APRSWeather:
+    """Represents an APRS weather report."""
+
+    timestamp: datetime
+    station: str
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    temperature: Optional[float] = None  # Fahrenheit
+    humidity: Optional[int] = None  # Percentage
+    pressure: Optional[float] = None  # mbar
+    wind_speed: Optional[float] = None  # MPH
+    wind_direction: Optional[int] = None  # Degrees
+    wind_gust: Optional[float] = None  # MPH
+    rain_1h: Optional[float] = None  # inches
+    rain_24h: Optional[float] = None  # inches
+    rain_since_midnight: Optional[float] = None  # inches
+    raw_data: str = ""
+    pressure_tendency: Optional[str] = None  # 'rising', 'falling', 'steady'
+    pressure_change_3h: Optional[float] = None  # Change in mbar over 3 hours
+
+
+@dataclass
+class APRSStatus:
+    """Represents an APRS status report."""
+
+    timestamp: datetime
+    station: str
+    status_text: str
+
+
+@dataclass
+class APRSTelemetry:
+    """Represents an APRS telemetry packet."""
+
+    timestamp: datetime
+    station: str
+    sequence: int  # 000-999
+    analog: List[int]  # 5 analog values (0-255)
+    digital: str  # 8 digital bits as string
+
+
+@dataclass
+class APRSStation:
+    """Represents an APRS station with all known information."""
+
+    callsign: str
+    first_heard: datetime
+    last_heard: datetime
+
+    # Position data
+    last_position: Optional[APRSPosition] = None
+    position_history: List[APRSPosition] = field(
+        default_factory=list
+    )  # Historical position reports with intelligent retention
+
+    # Weather data
+    last_weather: Optional[APRSWeather] = None
+    weather_history: List[APRSWeather] = field(
+        default_factory=list
+    )  # Historical weather reports with intelligent retention
+
+    # Status data
+    last_status: Optional[APRSStatus] = None
+
+    # Telemetry data
+    last_telemetry: Optional[APRSTelemetry] = None
+    telemetry_sequence: List[APRSTelemetry] = field(
+        default_factory=list
+    )  # Recent telemetry packets
+
+    # Message statistics
+    messages_received: int = 0  # Messages from this station
+    messages_sent: int = 0  # Messages to this station
+
+    # Packet statistics
+    packets_heard: int = 0  # Total packets from this station
+
+    # Third-party tracking
+    relay_paths: List[str] = field(
+        default_factory=list
+    )  # Relay stations (iGates) that forwarded packets
+    heard_direct: bool = (
+        False  # True if heard directly on RF (not via third-party)
+    )
+    hop_count: int = (
+        999  # Minimum hop count observed (0 = direct RF, 999 = unknown)
+    )
+    heard_zero_hop: bool = (
+        False  # True if we've EVER heard this station with 0 hops (direct, no digipeaters)
+    )
+
+    # Device identification
+    device: Optional[str] = None  # Device/radio type (e.g., "Yaesu FTM-400DR")
+
+    # Digipeater tracking (for coverage mapping and routing)
+    digipeater_path: List[str] = field(
+        default_factory=list
+    )  # Complete digipeater path from last packet (all hops) - DEPRECATED, use digipeater_paths
+
+    digipeater_paths: List[List[str]] = field(
+        default_factory=list
+    )  # All unique digipeater paths observed (including "DIRECT" for 0-hop)
+
+    digipeaters_heard_by: List[str] = field(
+        default_factory=list
+    )  # First-hop digipeaters only (for coverage circles)
+
+    is_digipeater: bool = False  # True if this station has acted as a digipeater
+
+
+# Zambretti Weather Forecasting Algorithm
+# Based on barometric pressure patterns (1915 algorithm)
+
+ZAMBRETTI_FORECASTS = {
+    0: 'Settled fine',
+    1: 'Fine weather',
+    2: 'Becoming fine',
+    3: 'Fine, becoming less settled',
+    4: 'Fine, possible showers',
+    5: 'Fairly fine, improving',
+    6: 'Fairly fine, possible showers early',
+    7: 'Fairly fine, showery later',
+    8: 'Showery early, improving',
+    9: 'Changeable, mending',
+    10: 'Fairly fine, showers likely',
+    11: 'Rather unsettled clearing later',
+    12: 'Unsettled, probably improving',
+    13: 'Showery, bright intervals',
+    14: 'Showery, becoming less settled',
+    15: 'Changeable, some rain',
+    16: 'Unsettled, short fine intervals',
+    17: 'Unsettled, rain later',
+    18: 'Unsettled, some rain',
+    19: 'Mostly very unsettled',
+    20: 'Occasional rain, worsening',
+    21: 'Rain at times, very unsettled',
+    22: 'Rain at frequent intervals',
+    23: 'Rain, very unsettled',
+    24: 'Stormy, may improve',
+    25: 'Stormy, much rain'
+}
+
+
+def adjust_pressure_to_sea_level(
+    station_pressure_mb: float,
+    altitude_m: float,
+    temperature_f: Optional[float] = None
+) -> float:
+    """Adjust station pressure to sea-level equivalent.
+
+    Args:
+        station_pressure_mb: Pressure at station in millibars
+        altitude_m: Station altitude in meters
+        temperature_f: Temperature in Fahrenheit (uses standard temp if None)
+
+    Returns:
+        Sea-level pressure in millibars
+    """
+    if altitude_m == 0:
+        return station_pressure_mb
+
+    # Use standard temperature (15°C = 59°F) if not provided
+    temp_k = 288.15  # 15°C in Kelvin
+    if temperature_f is not None:
+        temp_c = (temperature_f - 32) * 5/9
+        temp_k = temp_c + 273.15
+
+    # Barometric formula
+    # SLP = SP * (1 - (0.0065 * h) / (T + 0.0065 * h + 273.15))^-5.257
+    exponent = -5.257
+    slp = station_pressure_mb * (1 - (0.0065 * altitude_m) / temp_k) ** exponent
+
+    return slp
+
+
+def calculate_zambretti_code(
+    sea_level_pressure_mb: float,
+    pressure_trend: str,
+    wind_direction: Optional[int] = None,
+    month: int = None,
+    hemisphere: str = 'N'
+) -> str:
+    """Calculate Zambretti forecast code from pressure data.
+
+    Implements the beteljuice.com Zambretti algorithm (June 2008).
+    Based on the 1915 Negretti and Zambra weather forecaster.
+
+    Args:
+        sea_level_pressure_mb: Sea-level adjusted pressure in millibars
+        pressure_trend: 'rising', 'falling', or 'steady'
+        wind_direction: Wind direction in degrees (0-360), None if calm
+        month: Month number (1-12) for seasonal adjustment
+        hemisphere: 'N' or 'S'
+
+    Returns:
+        Zambretti forecast index (0-25)
+    """
+    # Zambretti parameters
+    z_baro_top = 1050.0  # Upper limit (UK weather range)
+    z_baro_bottom = 950.0  # Lower limit
+    z_range = z_baro_top - z_baro_bottom
+    z_constant = z_range / 22.0
+
+    # Start with sea-level adjusted pressure
+    z_hpa = sea_level_pressure_mb
+
+    # Determine season
+    is_summer = False
+    if month:
+        if hemisphere == 'N':
+            is_summer = 4 <= month <= 9  # Apr-Sep in Northern Hemisphere
+        else:
+            is_summer = month <= 3 or month >= 10  # Oct-Mar in Southern Hemisphere
+
+    # Apply wind direction adjustment
+    if wind_direction is not None:
+        # Convert degrees to 16-point compass
+        # N=0, NNE=22.5, NE=45, ENE=67.5, E=90, etc.
+        wind_points = [
+            ('N', 0), ('NNE', 22.5), ('NE', 45), ('ENE', 67.5),
+            ('E', 90), ('ESE', 112.5), ('SE', 135), ('SSE', 157.5),
+            ('S', 180), ('SSW', 202.5), ('SW', 225), ('WSW', 247.5),
+            ('W', 270), ('WNW', 292.5), ('NW', 315), ('NNW', 337.5)
+        ]
+
+        # Find closest cardinal direction
+        wind_cardinal = None
+        min_diff = 360
+        for name, angle in wind_points:
+            diff = abs(wind_direction - angle)
+            if diff > 180:
+                diff = 360 - diff
+            if diff < min_diff:
+                min_diff = diff
+                wind_cardinal = name
+
+        # Apply wind adjustments (Northern Hemisphere)
+        if hemisphere == 'N':
+            wind_adjustments = {
+                'N': 6, 'NNE': 5, 'NE': 5, 'ENE': 2,
+                'E': -0.5, 'ESE': -2, 'SE': -5, 'SSE': -8.5,
+                'S': -12, 'SSW': -10, 'SW': -6, 'WSW': -4.5,
+                'W': -3, 'WNW': -0.5, 'NW': 1.5, 'NNW': 3
+            }
+            if wind_cardinal in wind_adjustments:
+                z_hpa += (wind_adjustments[wind_cardinal] / 100.0) * z_range
+        else:  # Southern Hemisphere
+            wind_adjustments = {
+                'S': 6, 'SSW': 5, 'SW': 5, 'WSW': 2,
+                'W': -0.5, 'WNW': -2, 'NW': -5, 'NNW': -8.5,
+                'N': -12, 'NNE': -10, 'NE': -6, 'ENE': -4.5,
+                'E': -3, 'ESE': -0.5, 'SE': 1.5, 'SSE': 3
+            }
+            if wind_cardinal in wind_adjustments:
+                z_hpa += (wind_adjustments[wind_cardinal] / 100.0) * z_range
+
+    # Apply seasonal trend adjustment
+    if hemisphere == 'N' and is_summer:
+        if pressure_trend == 'rising':
+            z_hpa += (7 / 100.0) * z_range
+        elif pressure_trend == 'falling':
+            z_hpa -= (7 / 100.0) * z_range
+    elif hemisphere == 'S' and not is_summer:  # Winter in Southern
+        if pressure_trend == 'rising':
+            z_hpa += (7 / 100.0) * z_range
+        elif pressure_trend == 'falling':
+            z_hpa -= (7 / 100.0) * z_range
+
+    # Clamp to valid range
+    if z_hpa >= z_baro_top:
+        z_hpa = z_baro_top - 1
+
+    # Calculate option index (0-21)
+    z_option = int((z_hpa - z_baro_bottom) / z_constant)
+    z_option = max(0, min(21, z_option))
+
+    # Zambretti lookup tables (map option to forecast index)
+    rise_options = [25,25,25,24,24,19,16,12,11,9,8,6,5,2,1,1,0,0,0,0,0,0]
+    steady_options = [25,25,25,25,25,25,23,23,22,18,15,13,10,4,1,1,0,0,0,0,0,0]
+    fall_options = [25,25,25,25,25,25,25,25,23,23,21,20,17,14,7,3,1,1,1,0,0,0]
+
+    # Select forecast based on trend
+    if pressure_trend == 'rising':
+        return rise_options[z_option]
+    elif pressure_trend == 'falling':
+        return fall_options[z_option]
+    else:  # steady
+        return steady_options[z_option]
+
+
+def _parse_pressure_from_raw(raw_data: str) -> Optional[float]:
+    """
+    Extract and parse pressure from raw APRS data.
+
+    Auto-detects format:
+    - Tenths of mb: b10130 = 1013.0 mb
+    - Hundredths of inHg: b02979 = 29.79 inHg → converted to mb
+
+    Args:
+        raw_data: Raw APRS packet string
+
+    Returns:
+        Pressure in millibars, or None if not found/invalid
+    """
+    if not raw_data:
+        return None
+
+    match = re.search(r"b(\d{5})", raw_data)
+    if not match:
+        return None
+
+    raw_value = int(match.group(1))
+
+    # Try as tenths of millibars first
+    pressure_mb = raw_value / 10.0
+
+    # Sanity check: valid atmospheric pressure is 900-1100 mb
+    if 900 <= pressure_mb <= 1100:
+        return pressure_mb
+    else:
+        # Try as hundredths of inHg (US format)
+        pressure_inhg = raw_value / 100.0
+
+        # Sanity check: valid inHg range is 25-32 inHg
+        if 25 <= pressure_inhg <= 32:
+            return pressure_inhg * 33.8639
+
+    return None
+
+
+class APRSManager:
+    """Manages APRS messages and weather tracking."""
+
+    def __init__(self, my_callsign: str, max_retries: int = MESSAGE_MAX_RETRIES,
+                 retry_fast: int = MESSAGE_RETRY_FAST, retry_slow: int = MESSAGE_RETRY_SLOW):
+        """Initialize APRS manager.
+
+        Args:
+            my_callsign: Our callsign (without SSID, or with SSID)
+            max_retries: Maximum number of message retry attempts (default: 3)
+            retry_fast: Fast retry timeout in seconds for non-digipeated messages (default: 20)
+            retry_slow: Slow retry timeout in seconds for digipeated but not ACKed messages (default: 600)
+        """
+        self.my_callsign = my_callsign.upper()
+        # Support both with and without SSID
+        self.my_callsign_base = my_callsign.split("-")[0].upper()
+
+        # Message retry configuration
+        self.max_retries = max_retries
+        self.retry_fast = retry_fast  # Timeout for messages not yet digipeated
+        self.retry_slow = retry_slow  # Timeout for messages digipeated but not ACKed
+
+        # Storage
+        self.messages: List[APRSMessage] = []  # Messages addressed to us
+        self.monitored_messages: List[APRSMessage] = (
+            []
+        )  # All messages (monitoring)
+        self.weather_reports: Dict[str, APRSWeather] = (
+            {}
+        )  # station -> latest weather
+        self.position_reports: Dict[str, APRSPosition] = (
+            {}
+        )  # station -> latest position
+        self.stations: Dict[str, APRSStation] = (
+            {}
+        )  # station -> comprehensive info
+
+        # Duplicate packet detection cache
+        # Format: {packet_hash: timestamp}
+        self._duplicate_cache: Dict[str, float] = {}
+
+        # Command processor reference (for GPS access via web API)
+        self._cmd_processor = None
+
+        # Web broadcast callback for real-time updates
+        self._web_broadcast = None
+
+        # Database file location (GZIP compressed for efficiency)
+        self.db_file = os.path.expanduser("~/.aprs_stations.json.gz")
+        self.db_file_legacy = os.path.expanduser("~/.aprs_stations.json")
+
+        # Load persistent database
+        self.load_database()
+
+    def set_web_broadcast_callback(self, callback):
+        """Register callback for web UI real-time updates.
+
+        Args:
+            callback: Async function(event_type: str, data: dict) to broadcast events
+        """
+        self._web_broadcast = callback
+
+    def _broadcast_update(self, event_type: str, data):
+        """Broadcast update to web clients if callback is registered.
+
+        Args:
+            event_type: Type of event (station_update, weather_update, message_received)
+            data: Event data (station object, message object, etc.)
+        """
+        if self._web_broadcast:
+            try:
+                # Serialize data using late import to avoid circular dependency
+                # Import is cached after first call, so performance impact is minimal
+                if event_type in ('station_update', 'weather_update'):
+                    from src.web_api import serialize_station
+                    serialized = serialize_station(data)
+                elif event_type == 'message_received':
+                    from src.web_api import serialize_message
+                    serialized = serialize_message(data)
+                else:
+                    serialized = data
+
+                # Create task to run broadcast without blocking
+                asyncio.create_task(self._web_broadcast(event_type, serialized))
+            except Exception:
+                # Silently ignore broadcast errors to not disrupt normal operation
+                pass
+
+    def save_database(self):
+        """Save APRS station database to disk.
+
+        Saves the stations dictionary and monitored messages to GZIP-compressed
+        JSON format with datetime serialization. Uses atomic write to prevent
+        corruption.
+
+        Returns:
+            Number of stations saved, or 0 on error
+        """
+        try:
+            # Check directory write access first
+            db_dir = os.path.dirname(self.db_file)
+            if not os.path.exists(db_dir):
+                try:
+                    os.makedirs(db_dir, exist_ok=True)
+                except Exception as e:
+                    print_error(f"Cannot create database directory {db_dir}: {e}")
+                    return 0
+
+            if not os.access(db_dir, os.W_OK):
+                print_error(f"No write permission for database directory {db_dir}")
+                return 0
+
+            # Check if existing file is writable
+            if os.path.exists(self.db_file) and not os.access(self.db_file, os.W_OK):
+                print_error(f"No write permission for database file {self.db_file}")
+                return 0
+            # Prepare data for serialization
+            data = {
+                "stations": {},
+                "messages": [],
+                "saved_at": datetime.now().isoformat(),
+            }
+
+            # Convert stations to JSON-serializable format
+            for callsign, station in self.stations.items():
+                station_data = {
+                    "callsign": station.callsign,
+                    "first_heard": station.first_heard.isoformat(),
+                    "last_heard": station.last_heard.isoformat(),
+                    "messages_received": station.messages_received,
+                    "messages_sent": station.messages_sent,
+                    "packets_heard": station.packets_heard,
+                    "relay_paths": station.relay_paths,
+                    "heard_direct": station.heard_direct,
+                    "hop_count": station.hop_count,
+                    "heard_zero_hop": station.heard_zero_hop,
+                    "device": station.device,
+                    "digipeater_path": station.digipeater_path,
+                    "digipeater_paths": station.digipeater_paths,
+                    "digipeaters_heard_by": station.digipeaters_heard_by,
+                    "is_digipeater": station.is_digipeater,
+                }
+
+                # Add position data if present
+                if station.last_position:
+                    pos = station.last_position
+                    station_data["last_position"] = {
+                        "timestamp": pos.timestamp.isoformat(),
+                        "station": pos.station,
+                        "latitude": pos.latitude,
+                        "longitude": pos.longitude,
+                        "altitude": pos.altitude,
+                        "symbol_table": pos.symbol_table,
+                        "symbol_code": pos.symbol_code,
+                        "comment": pos.comment,
+                        "grid_square": pos.grid_square,
+                        "device": pos.device,
+                    }
+
+                # Add position history if present
+                if station.position_history:
+                    station_data["position_history"] = []
+                    for pos in station.position_history:
+                        station_data["position_history"].append({
+                            "timestamp": pos.timestamp.isoformat(),
+                            "station": pos.station,
+                            "latitude": pos.latitude,
+                            "longitude": pos.longitude,
+                            "altitude": pos.altitude,
+                            "symbol_table": pos.symbol_table,
+                            "symbol_code": pos.symbol_code,
+                            "comment": pos.comment,
+                            "grid_square": pos.grid_square,
+                            "device": pos.device,
+                        })
+
+                # Add weather data if present
+                if station.last_weather:
+                    wx = station.last_weather
+                    station_data["last_weather"] = {
+                        "timestamp": wx.timestamp.isoformat(),
+                        "station": wx.station,
+                        "latitude": wx.latitude,
+                        "longitude": wx.longitude,
+                        "temperature": wx.temperature,
+                        "humidity": wx.humidity,
+                        "pressure": wx.pressure,
+                        "wind_speed": wx.wind_speed,
+                        "wind_direction": wx.wind_direction,
+                        "wind_gust": wx.wind_gust,
+                        "rain_1h": wx.rain_1h,
+                        "rain_24h": wx.rain_24h,
+                        "rain_since_midnight": wx.rain_since_midnight,
+                        "raw_data": wx.raw_data,
+                    }
+
+                # Add weather history if present
+                if station.weather_history:
+                    station_data["weather_history"] = []
+                    for wx in station.weather_history:
+                        station_data["weather_history"].append({
+                            "timestamp": wx.timestamp.isoformat(),
+                            "station": wx.station,
+                            "latitude": wx.latitude,
+                            "longitude": wx.longitude,
+                            "temperature": wx.temperature,
+                            "humidity": wx.humidity,
+                            "pressure": wx.pressure,
+                            "wind_speed": wx.wind_speed,
+                            "wind_direction": wx.wind_direction,
+                            "wind_gust": wx.wind_gust,
+                            "rain_1h": wx.rain_1h,
+                            "rain_24h": wx.rain_24h,
+                            "rain_since_midnight": wx.rain_since_midnight,
+                            "raw_data": wx.raw_data,
+                        })
+
+                # Add status data if present
+                if station.last_status:
+                    status = station.last_status
+                    station_data["last_status"] = {
+                        "timestamp": status.timestamp.isoformat(),
+                        "station": status.station,
+                        "status_text": status.status_text,
+                    }
+
+                # Add telemetry data if present
+                if station.last_telemetry:
+                    telem = station.last_telemetry
+                    station_data["last_telemetry"] = {
+                        "timestamp": telem.timestamp.isoformat(),
+                        "station": telem.station,
+                        "sequence": telem.sequence,
+                        "analog": telem.analog,
+                        "digital": telem.digital,
+                    }
+
+                # Add telemetry sequence if present
+                if station.telemetry_sequence:
+                    station_data["telemetry_sequence"] = []
+                    for telem in station.telemetry_sequence:
+                        station_data["telemetry_sequence"].append(
+                            {
+                                "timestamp": telem.timestamp.isoformat(),
+                                "station": telem.station,
+                                "sequence": telem.sequence,
+                                "analog": telem.analog,
+                                "digital": telem.digital,
+                            }
+                        )
+
+                data["stations"][callsign] = station_data
+
+            # Save monitored messages
+            for msg in self.monitored_messages:
+                msg_data = {
+                    "timestamp": msg.timestamp.isoformat(),
+                    "from_call": msg.from_call,
+                    "to_call": msg.to_call,
+                    "message": msg.message,
+                    "message_id": msg.message_id,
+                    "direction": msg.direction,
+                    "ack_received": msg.ack_received,
+                    "failed": msg.failed,
+                    "retry_count": msg.retry_count,
+                    "last_sent": (
+                        msg.last_sent.isoformat() if msg.last_sent else None
+                    ),
+                    "read": msg.read,
+                }
+                data["messages"].append(msg_data)
+
+            # Write to GZIP compressed file (96% size reduction vs plain JSON)
+            # Use atomic write: write to temp file, then rename
+            temp_file = self.db_file + ".tmp"
+
+            try:
+                # Write to temporary file
+                with gzip.open(temp_file, "wt", encoding="utf-8", compresslevel=6) as f:
+                    json.dump(data, f, separators=(',', ':'))  # Compact format
+
+                # Atomic rename (overwrites existing file safely)
+                os.replace(temp_file, self.db_file)
+
+            except Exception as write_error:
+                # Clean up temp file on failure
+                if os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                    except:
+                        pass
+                raise write_error
+
+            # Return count for confirmation message
+            return len(data["stations"])
+
+        except PermissionError as e:
+            print_error(f"Permission denied writing APRS database: {e}")
+            print_error(f"Check file permissions on {self.db_file}")
+            return 0
+        except IOError as e:
+            print_error(f"I/O error writing APRS database: {e}")
+            print_error(f"Check disk space and file system")
+            return 0
+        except Exception as e:
+            # Don't crash on save errors, just log with details
+            print_error(f"Failed to save APRS database: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+            return 0
+
+    def load_database(self):
+        """Load APRS station database from disk.
+
+        Loads previously saved stations, positions, and weather data.
+        If file doesn't exist or is corrupt, starts with empty database.
+
+        Supports both GZIP compressed (.json.gz) and legacy plain JSON (.json) formats.
+        Automatically migrates from .json to .json.gz on first save.
+        """
+        load_start = time.time()
+
+        # Try GZIP compressed file first (new format)
+        if os.path.exists(self.db_file):
+            try:
+                decompress_start = time.time()
+                with gzip.open(self.db_file, "rt", encoding="utf-8") as f:
+                    data = json.load(f)
+                decompress_time = time.time() - decompress_start
+                print_info(f"Database decompression: {decompress_time:.2f}s")
+            except Exception as e:
+                print_info(f"Warning: Failed to load GZIP database: {e}")
+                return
+        # Fall back to legacy plain JSON file (backward compatibility)
+        elif os.path.exists(self.db_file_legacy):
+            try:
+                with open(self.db_file_legacy, "r") as f:
+                    data = json.load(f)
+                print_info(f"Loaded legacy JSON database (will migrate to GZIP on next save)")
+            except Exception as e:
+                print_info(f"Warning: Failed to load legacy database: {e}")
+                return
+        else:
+            return  # No saved database, start fresh
+
+        try:
+            parse_start = time.time()
+
+            station_count = len(data.get("stations", {}))
+            total_positions = 0
+            total_weather = 0
+            total_telemetry = 0
+
+            # Restore stations
+            for callsign, station_data in data.get("stations", {}).items():
+                # Create station object
+                station = APRSStation(
+                    callsign=station_data["callsign"],
+                    first_heard=datetime.fromisoformat(
+                        station_data["first_heard"]
+                    ),
+                    last_heard=datetime.fromisoformat(
+                        station_data["last_heard"]
+                    ),
+                    messages_received=station_data.get("messages_received", 0),
+                    messages_sent=station_data.get("messages_sent", 0),
+                    packets_heard=station_data.get("packets_heard", 0),
+                    relay_paths=station_data.get("relay_paths", []),
+                    heard_direct=station_data.get("heard_direct", False),
+                    hop_count=station_data.get("hop_count", 999),
+                    heard_zero_hop=station_data.get("heard_zero_hop", False),
+                    device=station_data.get("device"),
+                    digipeater_path=station_data.get("digipeater_path", []),
+                    digipeater_paths=station_data.get("digipeater_paths", []),
+                    digipeaters_heard_by=station_data.get("digipeaters_heard_by", []),
+                    is_digipeater=station_data.get("is_digipeater", False),
+                )
+
+                # Restore position if present
+                if "last_position" in station_data:
+                    pos_data = station_data["last_position"]
+                    station.last_position = APRSPosition(
+                        timestamp=datetime.fromisoformat(
+                            pos_data["timestamp"]
+                        ),
+                        station=pos_data["station"],
+                        latitude=pos_data["latitude"],
+                        longitude=pos_data["longitude"],
+                        altitude=pos_data.get("altitude"),
+                        symbol_table=pos_data.get("symbol_table", "/"),
+                        symbol_code=pos_data.get("symbol_code", ">"),
+                        comment=pos_data.get("comment", ""),
+                        grid_square=pos_data.get("grid_square", ""),
+                        device=pos_data.get("device"),
+                    )
+                    # Also add to position_reports dict
+                    self.position_reports[callsign] = station.last_position
+
+                # Restore weather if present
+                if "last_weather" in station_data:
+                    wx_data = station_data["last_weather"]
+                    station.last_weather = APRSWeather(
+                        timestamp=datetime.fromisoformat(wx_data["timestamp"]),
+                        station=wx_data["station"],
+                        latitude=wx_data.get("latitude"),
+                        longitude=wx_data.get("longitude"),
+                        temperature=wx_data.get("temperature"),
+                        humidity=wx_data.get("humidity"),
+                        pressure=wx_data.get("pressure"),
+                        wind_speed=wx_data.get("wind_speed"),
+                        wind_direction=wx_data.get("wind_direction"),
+                        wind_gust=wx_data.get("wind_gust"),
+                        rain_1h=wx_data.get("rain_1h"),
+                        rain_24h=wx_data.get("rain_24h"),
+                        rain_since_midnight=wx_data.get("rain_since_midnight"),
+                        raw_data=wx_data.get("raw_data", ""),
+                    )
+
+                    # Migration: Fix invalid pressure values from old parsing bug
+                    if station.last_weather.pressure is not None:
+                        if station.last_weather.pressure < 900 or station.last_weather.pressure > 1100:
+                            # Invalid pressure, try to reparse from raw_data
+                            corrected = _parse_pressure_from_raw(station.last_weather.raw_data)
+                            if corrected is not None:
+                                print_info(f"Migrated pressure for {callsign}: {station.last_weather.pressure:.1f} → {corrected:.1f} mb")
+                                station.last_weather.pressure = corrected
+
+                    # Also add to weather_reports dict
+                    self.weather_reports[callsign] = station.last_weather
+
+                # Restore weather history if present
+                if "weather_history" in station_data:
+                    station.weather_history = []
+                    for wx_data in station_data["weather_history"]:
+                        wx = APRSWeather(
+                            timestamp=datetime.fromisoformat(wx_data["timestamp"]),
+                            station=wx_data["station"],
+                            latitude=wx_data.get("latitude"),
+                            longitude=wx_data.get("longitude"),
+                            temperature=wx_data.get("temperature"),
+                            humidity=wx_data.get("humidity"),
+                            pressure=wx_data.get("pressure"),
+                            wind_speed=wx_data.get("wind_speed"),
+                            wind_direction=wx_data.get("wind_direction"),
+                            wind_gust=wx_data.get("wind_gust"),
+                            rain_1h=wx_data.get("rain_1h"),
+                            rain_24h=wx_data.get("rain_24h"),
+                            rain_since_midnight=wx_data.get("rain_since_midnight"),
+                            raw_data=wx_data.get("raw_data", ""),
+                        )
+
+                        # Migration: Fix invalid pressure values in history
+                        if wx.pressure is not None:
+                            if wx.pressure < 900 or wx.pressure > 1100:
+                                corrected = _parse_pressure_from_raw(wx.raw_data)
+                                if corrected is not None:
+                                    wx.pressure = corrected
+
+                        station.weather_history.append(wx)
+                        total_weather += 1
+
+                # Restore position history if present
+                if "position_history" in station_data:
+                    station.position_history = []
+                    for pos_data in station_data["position_history"]:
+                        pos = APRSPosition(
+                            timestamp=datetime.fromisoformat(pos_data["timestamp"]),
+                            station=pos_data["station"],
+                            latitude=pos_data["latitude"],
+                            longitude=pos_data["longitude"],
+                            altitude=pos_data.get("altitude"),
+                            symbol_table=pos_data.get("symbol_table", "/"),
+                            symbol_code=pos_data.get("symbol_code", ">"),
+                            comment=pos_data.get("comment", ""),
+                            grid_square=pos_data.get("grid_square", ""),
+                            device=pos_data.get("device"),
+                        )
+                        station.position_history.append(pos)
+                        total_positions += 1
+
+                # Restore status if present
+                if "last_status" in station_data:
+                    status_data = station_data["last_status"]
+                    station.last_status = APRSStatus(
+                        timestamp=datetime.fromisoformat(
+                            status_data["timestamp"]
+                        ),
+                        station=status_data["station"],
+                        status_text=status_data["status_text"],
+                    )
+
+                # Restore telemetry if present
+                if "last_telemetry" in station_data:
+                    telem_data = station_data["last_telemetry"]
+                    station.last_telemetry = APRSTelemetry(
+                        timestamp=datetime.fromisoformat(
+                            telem_data["timestamp"]
+                        ),
+                        station=telem_data["station"],
+                        sequence=telem_data["sequence"],
+                        analog=telem_data["analog"],
+                        digital=telem_data["digital"],
+                    )
+
+                # Restore telemetry sequence if present
+                if "telemetry_sequence" in station_data:
+                    station.telemetry_sequence = []
+                    for telem_data in station_data["telemetry_sequence"]:
+                        telem = APRSTelemetry(
+                            timestamp=datetime.fromisoformat(
+                                telem_data["timestamp"]
+                            ),
+                            station=telem_data["station"],
+                            sequence=telem_data["sequence"],
+                            analog=telem_data["analog"],
+                            digital=telem_data["digital"],
+                        )
+                        station.telemetry_sequence.append(telem)
+                        total_telemetry += 1
+
+                # Add station to dictionary
+                self.stations[callsign] = station
+
+            # Restore messages
+            for msg_data in data.get("messages", []):
+                # Parse last_sent timestamp if present
+                last_sent = None
+                if msg_data.get("last_sent"):
+                    try:
+                        last_sent = datetime.fromisoformat(
+                            msg_data["last_sent"]
+                        )
+                    except Exception:
+                        pass
+
+                msg = APRSMessage(
+                    timestamp=datetime.fromisoformat(msg_data["timestamp"]),
+                    from_call=msg_data["from_call"],
+                    to_call=msg_data["to_call"],
+                    message=msg_data["message"],
+                    message_id=msg_data.get("message_id"),
+                    direction=msg_data.get(
+                        "direction", "received"
+                    ),  # Default to 'received' for old data
+                    ack_received=msg_data.get("ack_received", False),
+                    failed=msg_data.get("failed", False),
+                    retry_count=msg_data.get("retry_count", 0),
+                    last_sent=last_sent,
+                    read=msg_data.get("read", False),
+                )
+                self.monitored_messages.append(msg)
+                # Add to personal messages if addressed to us (received) or from us (sent)
+                if msg.direction == "sent" or self.is_message_for_me(
+                    msg.to_call
+                ):
+                    self.messages.append(msg)
+
+            # Success message
+            parse_time = time.time() - parse_start
+            load_time = time.time() - load_start
+
+            message_count = len(data.get("messages", []))
+            if station_count > 0 or message_count > 0:
+                saved_at = data.get("saved_at", "unknown time")
+                print_info(
+                    f"Loaded {station_count} station(s), {message_count} message(s) from APRS database (saved {saved_at})"
+                )
+                print_info(
+                    f"  Histories: {total_positions} positions, {total_weather} weather, {total_telemetry} telemetry"
+                )
+                print_info(
+                    f"  Parse time: {parse_time:.2f}s, Total load time: {load_time:.2f}s"
+                )
+
+        except Exception as e:
+            # Don't crash on load errors, just start fresh
+            print_info(f"Warning: Failed to load APRS database: {e}")
+            self.stations.clear()
+            self.position_reports.clear()
+            self.weather_reports.clear()
+
+    def is_message_for_me(self, to_call: str) -> bool:
+        """Check if a message is addressed to our callsign.
+
+        Args:
+            to_call: Destination callsign
+
+        Returns:
+            True if message is for us
+        """
+        to_call_upper = to_call.upper().strip()
+        to_call_base = to_call_upper.split("-")[0]
+
+        result = (
+            to_call_upper == self.my_callsign
+            or to_call_upper == self.my_callsign_base
+            or to_call_base == self.my_callsign_base
+        )
+
+        print_debug(
+            f"is_message_for_me: to_call='{to_call}' -> '{to_call_upper}' (base={to_call_base}), my_callsign='{self.my_callsign}' (base={self.my_callsign_base}), result={result}",
+            level=5,
+        )
+
+        return result
+
+    def is_duplicate_packet(self, callsign: str, info: str) -> bool:
+        """Check if packet is a duplicate based on source and content.
+
+        Packets from the same source with identical content within the
+        duplicate window (30 seconds) are considered duplicates.
+
+        This suppresses multiple digipeater copies of the same packet
+        while still allowing new packets from the same station.
+
+        Args:
+            callsign: Source callsign
+            info: Packet information field content
+
+        Returns:
+            True if packet is a duplicate, False otherwise
+        """
+        # Create hash of source + content
+        packet_key = f"{callsign.upper()}:{info}"
+        packet_hash = hashlib.md5(packet_key.encode()).hexdigest()
+
+        current_time = time.time()
+
+        # Clean old entries from cache (older than duplicate window)
+        expired = [
+            h
+            for h, ts in self._duplicate_cache.items()
+            if current_time - ts > DUPLICATE_WINDOW
+        ]
+        for h in expired:
+            del self._duplicate_cache[h]
+
+        # Check if this packet hash exists in cache
+        if packet_hash in self._duplicate_cache:
+            # Duplicate found
+            print_debug(
+                f"APRS duplicate suppressed: {callsign} (digipeated copy)",
+                level=6,
+            )
+            return True
+
+        # Not a duplicate - add to cache
+        self._duplicate_cache[packet_hash] = current_time
+        return False
+
+    def record_digipeater_path(self, callsign: str, digipeater_path: List[str]):
+        """Record digipeater paths for a station (used even for duplicate packets).
+
+        This lightweight method ONLY updates digipeater tracking without full packet
+        processing. This ensures digipeater coverage data is accurate even when
+        duplicate suppression is active.
+
+        Stores:
+        - Complete digipeater path (for analysis)
+        - First hop only in digipeaters_heard_by (for coverage circles)
+
+        Args:
+            callsign: Station callsign
+            digipeater_path: List of digipeater callsigns from AX.25 path
+        """
+        if not digipeater_path:
+            return  # No digipeaters to record
+
+        # Strip asterisk from callsign (APRS path marker, not part of callsign)
+        callsign_upper = callsign.upper().rstrip('*')
+        now = datetime.now()
+
+        # Create station if it doesn't exist
+        if callsign_upper not in self.stations:
+            self.stations[callsign_upper] = APRSStation(
+                callsign=callsign_upper,
+                first_heard=now,
+                last_heard=now,
+                packets_heard=0,
+            )
+
+        # Update last_heard timestamp (don't increment packet count for duplicates)
+        self.stations[callsign_upper].last_heard = now
+
+        # Store complete digipeater path (legacy single path field)
+        self.stations[callsign_upper].digipeater_path = [d.upper() for d in digipeater_path]
+
+        # Store in all-paths list (new)
+        if digipeater_path:
+            normalized_path = [d.upper() for d in digipeater_path]
+            if normalized_path not in self.stations[callsign_upper].digipeater_paths:
+                self.stations[callsign_upper].digipeater_paths.append(normalized_path)
+        else:
+            # Heard direct (no digipeaters) - add "DIRECT" to paths
+            self.stations[callsign_upper].heard_zero_hop = True
+            if ["DIRECT"] not in self.stations[callsign_upper].digipeater_paths:
+                self.stations[callsign_upper].digipeater_paths.append(["DIRECT"])
+
+        # Mark all stations in the digipeater path as digipeaters
+        # Only mark stations we've actually heard (don't create phantom entries)
+        for digi_call in digipeater_path:
+            digi_upper = digi_call.upper().rstrip('*')
+            if digi_upper and digi_upper in self.stations:
+                if not self.stations[digi_upper].is_digipeater:
+                    self.stations[digi_upper].is_digipeater = True
+
+        # Track only FIRST digipeater for coverage mapping
+        # (the one that heard the station directly over RF)
+        first_digi = digipeater_path[0].upper().rstrip('*')
+        if first_digi and first_digi not in self.stations[callsign_upper].digipeaters_heard_by:
+            self.stations[callsign_upper].digipeaters_heard_by.append(first_digi)
+
+    def _get_or_create_station(
+        self,
+        callsign: str,
+        relay_call: str = None,
+        hop_count: int = 999,
+        is_duplicate: bool = False,
+        digipeater_path: List[str] = None,
+    ) -> APRSStation:
+        """Get or create a station entry.
+
+        Args:
+            callsign: Station callsign
+            relay_call: Optional relay station (for third-party packets)
+            hop_count: Number of digipeater hops (0 = direct RF, 999 = unknown)
+            is_duplicate: If True, don't increment packet count (duplicate suppression)
+            digipeater_path: List of digipeater callsigns from AX.25 path
+
+        Returns:
+            APRSStation object
+        """
+        # Strip asterisk from callsign (APRS path marker, not part of callsign)
+        callsign_upper = callsign.upper().rstrip('*')
+        now = datetime.now()
+
+        if callsign_upper not in self.stations:
+            self.stations[callsign_upper] = APRSStation(
+                callsign=callsign_upper,
+                first_heard=now,
+                last_heard=now,
+                packets_heard=0,
+            )
+
+        # Update last heard
+        self.stations[callsign_upper].last_heard = now
+
+        # Only increment packet count if not a duplicate
+        if not is_duplicate:
+            self.stations[callsign_upper].packets_heard += 1
+
+        # Update hop count to minimum observed
+        if hop_count < self.stations[callsign_upper].hop_count:
+            self.stations[callsign_upper].hop_count = hop_count
+
+        # Track if we've EVER heard with zero hops (direct, no digipeaters)
+        if hop_count == 0:
+            self.stations[callsign_upper].heard_zero_hop = True
+
+        # Track relay path if third-party
+        if relay_call:
+            relay_upper = relay_call.upper()
+            if relay_upper not in self.stations[callsign_upper].relay_paths:
+                self.stations[callsign_upper].relay_paths.append(relay_upper)
+        else:
+            # Heard directly on RF
+            self.stations[callsign_upper].heard_direct = True
+
+        # Track digipeater paths for analysis
+        # - Complete path: all hops (for routing analysis, first/last hop determination)
+        # - First hop only: for digipeater coverage circles
+        if digipeater_path:
+            # Store complete path (legacy single path field)
+            self.stations[callsign_upper].digipeater_path = [d.upper() for d in digipeater_path]
+
+            # Store in all-paths list (new)
+            normalized_path = [d.upper() for d in digipeater_path]
+            if normalized_path not in self.stations[callsign_upper].digipeater_paths:
+                self.stations[callsign_upper].digipeater_paths.append(normalized_path)
+
+            # Mark all stations in the digipeater path as digipeaters
+            # Only mark stations we've actually heard (don't create phantom entries)
+            for digi_call in digipeater_path:
+                digi_upper = digi_call.upper().rstrip('*')
+                if digi_upper and digi_upper != callsign_upper and digi_upper in self.stations:
+                    if not self.stations[digi_upper].is_digipeater:
+                        self.stations[digi_upper].is_digipeater = True
+        elif hop_count == 0:
+            # Heard direct (no digipeaters) - add "DIRECT" to paths
+            if ["DIRECT"] not in self.stations[callsign_upper].digipeater_paths:
+                self.stations[callsign_upper].digipeater_paths.append(["DIRECT"])
+
+            # Track only FIRST digipeater for coverage circles
+            # (shows which digipeater heard the station directly over RF)
+            first_digi = digipeater_path[0].upper().rstrip('*')
+            if first_digi and first_digi not in self.stations[callsign_upper].digipeaters_heard_by:
+                self.stations[callsign_upper].digipeaters_heard_by.append(first_digi)
+
+        return self.stations[callsign_upper]
+
+    def parse_third_party(
+        self, relay_call: str, info: str
+    ) -> Optional[Tuple[str, str, str]]:
+        """Parse third-party APRS packet.
+
+        Third-party format: }SOURCE>DEST,PATH:info_field
+
+        Args:
+            relay_call: Callsign of the relay station
+            info: APRS information field
+
+        Returns:
+            Tuple of (source_call, relay_call, inner_info) if third-party, None otherwise
+        """
+        if not info.startswith("}"):
+            return None
+
+        try:
+            # Remove leading }
+            inner = info[1:]
+
+            # Extract source callsign (before >)
+            gt_pos = inner.find(">")
+            if gt_pos == -1:
+                return None
+
+            source_call = inner[:gt_pos].strip()
+
+            # Find the FIRST : after the > which separates header from info
+            # (Can't use rfind because info field may contain colons, e.g., APRS messages)
+            colon_pos = inner.find(":", gt_pos)
+            if colon_pos == -1:
+                return None
+
+            inner_info = inner[colon_pos + 1 :]
+
+            print_debug(
+                f"parse_third_party: source={source_call}, relay={relay_call}, inner_info='{inner_info[:50]}...'",
+                level=5,
+            )
+
+            return (source_call, relay_call, inner_info)
+
+        except Exception as e:
+            print_debug(f"parse_third_party: exception {e}", level=5)
+            return None
+
+    def parse_aprs_mice(
+        self,
+        station: str,
+        dest_addr: str,
+        info: str,
+        relay_call: str = None,
+        hop_count: int = 999,
+        digipeater_path: List[str] = None,
+    ) -> Optional[APRSPosition]:
+        """Parse MIC-E format APRS position.
+
+        MIC-E encodes position data in the destination address and first 9 bytes of info.
+
+        Args:
+            station: Station callsign
+            dest_addr: Destination address (contains encoded latitude)
+            info: APRS information field
+            relay_call: Optional relay station (for third-party packets)
+            hop_count: Number of digipeater hops (0 = direct RF)
+            digipeater_path: List of digipeater callsigns from AX.25 path
+
+        Returns:
+            APRSPosition if valid MIC-E, None otherwise
+        """
+        # MIC-E packets start with specific data types
+        if not info or len(info) < 9:
+            return None
+
+        # Check for MIC-E indicator (', `, or 0x1c-0x1f)
+        first_byte = ord(info[0]) if isinstance(info[0], str) else info[0]
+        if first_byte not in (0x27, 0x60, 0x1C, 0x1D, 0x1E, 0x1F):
+            return None
+
+        try:
+            print_debug(
+                f"MIC-E parsing: {station} dest={dest_addr} info={repr(info[:20])}...",
+                level=5,
+                stations=[station]
+            )
+
+            # Remove SSID from dest_addr if present
+            dest_call = (
+                dest_addr.split("-")[0] if "-" in dest_addr else dest_addr
+            )
+
+            # Destination address must be 6 characters for MIC-E
+            if len(dest_call) != 6:
+                return None
+
+            # Decode latitude from destination address
+            # Each character encodes a digit plus message/position info
+            lat_digits = []
+            north_south = None
+            msg_bits = []
+
+            for i, ch in enumerate(dest_call):
+                if "0" <= ch <= "9":
+                    lat_digits.append(ch)
+                    msg_bits.append(0)
+                elif "A" <= ch <= "J":
+                    lat_digits.append(str(ord(ch) - ord("A")))
+                    msg_bits.append(1)
+                elif "P" <= ch <= "Y":
+                    lat_digits.append(str(ord(ch) - ord("P")))
+                    msg_bits.append(1)
+                elif ch == "K" or ch == "L" or ch == "Z":
+                    # Space characters represent zero
+                    lat_digits.append("0")
+                    msg_bits.append(0 if ch == "L" else 1)
+                else:
+                    return None
+
+            # Extract latitude
+            if len(lat_digits) != 6:
+                return None
+
+            # Format: DDMM.HH (degrees, minutes, hundredths)
+            lat_str = "".join(lat_digits)
+
+            lat_deg = int(lat_str[0:2])
+            lat_min = float(lat_str[2:4] + "." + lat_str[4:6])
+            latitude = lat_deg + (lat_min / 60.0)
+
+            # N/S is encoded in message bits (bit 3)
+            # Per APRS spec: 0 = South, 1 = North
+            if msg_bits[3] == 0:
+                latitude = -latitude  # South
+
+            # Decode longitude from info bytes 1-3
+            lon_deg = ord(info[1]) - 28
+            lon_min = ord(info[2]) - 28
+            lon_min_frac = ord(info[3]) - 28
+
+            # Longitude offset is in message bits (bit 4)
+            if msg_bits[4] == 1:
+                lon_deg += 100  # +100 for longitude >= 100 degrees
+
+            # E/W is in message bits (bit 5)
+            longitude = lon_deg + ((lon_min + lon_min_frac / 100.0) / 60.0)
+            if msg_bits[5] == 1:
+                longitude = -longitude  # West
+
+            print_debug(
+                f"MIC-E decoded position: {latitude:.6f}, {longitude:.6f}",
+                level=5,
+                stations=[station]
+            )
+
+            # Extract speed and course from bytes 4-6
+            speed_course = ord(info[4]) - 28
+            speed = ((ord(info[5]) - 28) * 10) + ((speed_course // 10) % 10)
+            course = ((speed_course % 10) * 100) + (ord(info[6]) - 28)
+
+            # Symbol table and code
+            symbol_code = info[7] if len(info) > 7 else ">"
+            symbol_table = info[8] if len(info) > 8 else "/"
+
+            # Status text (everything after byte 8)
+            # MIC-E status format: T......Mv where:
+            #   T = Type indicator (1 byte): space, >, ], `, '
+            #   . = Free text (7 bytes, can include altitude as "}aaa" base-91 encoding)
+            #   M = Manufacturer code (1 byte)
+            #   v = Version code (1 byte)
+            raw_comment = info[9:] if len(info) > 9 else ""
+
+            # Strip MIC-E type indicator (first byte)
+            # Known type indicators: space (0x20), > (0x3E), ] (0x5D), ` (0x60), ' (0x27)
+            if raw_comment and ord(raw_comment[0]) in (
+                0x20,
+                0x3E,
+                0x5D,
+                0x60,
+                0x27,
+            ):
+                raw_comment = raw_comment[1:]
+
+            # Keep only printable characters (0x20-0x7E = space through tilde)
+            printable_comment = "".join(
+                c for c in raw_comment if 0x20 <= ord(c) <= 0x7E
+            )
+
+            # Strip MIC-E altitude encoding if present: }xyz (base-91)
+            # Altitude format: } followed by 2-3 base-91 characters
+            if "}" in printable_comment:
+                # Find the } and remove it plus following characters that look like altitude
+                brace_idx = printable_comment.find("}")
+                # Base-91 uses chars 0x21-0x7B (! through {)
+                end_idx = brace_idx + 1
+                while (
+                    end_idx < len(printable_comment)
+                    and end_idx < brace_idx + 4
+                ):
+                    ch = printable_comment[end_idx]
+                    if 0x21 <= ord(ch) <= 0x7B:  # Base-91 character range
+                        end_idx += 1
+                    else:
+                        break
+                # Remove the altitude encoding
+                printable_comment = (
+                    printable_comment[:brace_idx] + printable_comment[end_idx:]
+                )
+
+            # Identify device type from MIC-E comment suffix BEFORE stripping
+            # MIC-E devices encode type in last 2 characters (new-style) or prefix+suffix (legacy)
+            device_str = None
+            try:
+                device_id = get_device_identifier()
+                device_info = device_id.identify_by_mice(printable_comment)
+                if device_info:
+                    device_str = str(device_info)
+                    print_debug(
+                        f"MIC-E device identified: {device_str} (comment: {repr(printable_comment[-10:])})",
+                        level=3,
+                        stations=[station]
+                    )
+                else:
+                    print_debug(
+                        f"MIC-E device not found for comment: {repr(printable_comment[-10:])}",
+                        level=4,
+                        stations=[station]
+                    )
+            except Exception as e:
+                print_debug(f"MIC-E device ID error: {e}", level=3, stations=[station])
+
+            # Strip trailing manufacturer/version codes (last 1-2 chars)
+            # These are typically symbols (non-alphanumeric except space)
+            while (
+                len(printable_comment) > 0
+                and printable_comment[-1]
+                in "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+            ):
+                printable_comment = printable_comment[:-1]
+
+            # Strip trailing whitespace
+            printable_comment = printable_comment.rstrip()
+
+            # If result is mostly symbols/gibberish (>60% non-alphanumeric), suppress it
+            if printable_comment:
+                alphanumeric_count = sum(
+                    1 for c in printable_comment if c.isalnum() or c == " "
+                )
+                if (
+                    len(printable_comment) > 0
+                    and (alphanumeric_count / len(printable_comment)) < 0.4
+                ):
+                    printable_comment = ""  # Suppress gibberish
+
+            # Apply standard APRS comment cleaning to remove data fields (PHG, weather codes, etc.)
+            comment = self.clean_position_comment(printable_comment)
+
+            print_debug(
+                f"MIC-E symbol: {symbol_table}{symbol_code}, comment: {repr(comment)}",
+                level=5,
+                stations=[station]
+            )
+
+            # Convert to Maidenhead grid
+            grid_square = self.latlon_to_maidenhead(latitude, longitude)
+
+            # Filter out invalid "Null Island" coordinates (0.0, 0.0)
+            if latitude == 0.0 and longitude == 0.0:
+                print_debug(
+                    f"parse_mice_position: Rejecting Null Island coordinates from {station}",
+                    level=5,
+                    stations=[station]
+                )
+                return None
+
+            # Create position object
+            pos = APRSPosition(
+                timestamp=datetime.now(),
+                station=station.upper(),
+                latitude=latitude,
+                longitude=longitude,
+                symbol_table=symbol_table,
+                symbol_code=symbol_code,
+                comment=comment,
+                grid_square=grid_square,
+                device=device_str,
+            )
+
+            # Store position
+            self.position_reports[station.upper()] = pos
+
+            # Track station
+            sta = self._get_or_create_station(station, relay_call, hop_count, digipeater_path=digipeater_path)
+            sta.last_position = pos
+            if device_str:
+                sta.device = device_str
+            self._add_position_to_history(sta, pos)
+
+            # Broadcast station update to web clients
+            self._broadcast_update('station_update', sta)
+
+            print_debug(
+                f"MIC-E position stored: {station} @ {grid_square} ({latitude:.6f}, {longitude:.6f})",
+                level=5,
+                stations=[station]
+            )
+
+            return pos
+
+        except Exception as e:
+            print_debug(f"parse_aprs_mice exception for {station}: {e}", level=5, stations=[station])
+            import traceback
+            print_debug(traceback.format_exc(), level=6, stations=[station])
+            return None
+
+    def parse_aprs_message(
+        self,
+        from_call: str,
+        info: str,
+        relay_call: str = None,
+        hop_count: int = 999,
+        digipeater_path: List[str] = None,
+    ) -> Optional[APRSMessage]:
+        """Parse APRS message format.
+
+        APRS message format: :CALLSIGN :message text{12345
+        Where CALLSIGN is 9 chars padded with spaces, {12345 is optional message ID
+
+        Args:
+            from_call: Source callsign
+            info: APRS information field
+            relay_call: Optional relay station (for third-party packets)
+            hop_count: Number of digipeater hops (0 = direct RF)
+            digipeater_path: List of digipeater callsigns from AX.25 path
+
+        Returns:
+            APRSMessage if this is a message, None otherwise
+        """
+        if not info.startswith(":"):
+            return None
+
+        print_debug(
+            f"parse_aprs_message: from={from_call}, info='{info[:50]}...'",
+            level=5,
+        )
+
+        try:
+            # Format: :CALLSIGN :message{id
+            # CALLSIGN is 9 chars (padded with spaces)
+            if len(info) < 11:  # Minimum: ":" + 9-char call + ":"
+                print_debug(
+                    f"parse_aprs_message: info too short ({len(info)} chars)",
+                    level=5,
+                )
+                return None
+
+            to_call = info[1:10].strip()  # Extract 9-char callsign field
+            if info[10] != ":":
+                print_debug(
+                    f"parse_aprs_message: missing colon at position 10",
+                    level=5,
+                )
+                return None
+
+            message_part = info[11:]
+
+            print_debug(
+                f"parse_aprs_message: to_call='{to_call}', message='{message_part[:30]}...'",
+                level=5,
+            )
+
+            # Check for message ID: {12345
+            message_id = None
+            message_text = message_part
+            if "{" in message_part:
+                parts = message_part.split("{", 1)
+                message_text = parts[0]
+                if len(parts) > 1:
+                    message_id = parts[1].strip()
+
+            # Filter out telemetry definition messages (not user messages)
+            # These are configuration broadcasts: PARM., UNIT., EQNS., BITS.
+            if message_text.startswith(("PARM.", "UNIT.", "EQNS.", "BITS.")):
+                # Track station activity but don't treat as a message
+                sender_station = self._get_or_create_station(
+                    from_call, relay_call, hop_count, digipeater_path=digipeater_path
+                )
+                sender_station.packets_heard += (
+                    1  # Count as packet, not message
+                )
+                print_debug(
+                    f"parse_aprs_message: filtered out telemetry config message",
+                    level=5,
+                )
+                return None  # Don't notify - these are telemetry config, not messages
+
+            # Handle ACK/REJ messages (protocol acknowledgments)
+            # Format: "ack12345" or "rej12345"
+            if message_text.lower().startswith(("ack", "rej")):
+                # Track station activity
+                sender_station = self._get_or_create_station(
+                    from_call, relay_call, hop_count, digipeater_path=digipeater_path
+                )
+                sender_station.packets_heard += 1  # Count as packet activity
+
+                # Check if this ACK is for one of our sent messages
+                if message_text.lower().startswith("ack"):
+                    # Extract ID after "ack", handling multi-line format: ack12345}line_num
+                    acked_msg_id = message_text[3:].strip()
+                    if "}" in acked_msg_id:
+                        acked_msg_id = acked_msg_id.split("}")[0]
+                    print_debug(
+                        f"parse_aprs_message: received ACK for message ID '{acked_msg_id}' from {from_call}",
+                        level=5,
+                    )
+
+                    # Extract base callsign from ACK sender (strip SSID)
+                    from_call_base = from_call.upper().split("-")[0]
+
+                    # Find and mark our sent message as acknowledged
+                    found = False
+                    for sent_msg in self.messages:
+                        if sent_msg.direction == "sent":
+                            print_debug(
+                                f"  Checking sent msg: to={sent_msg.to_call}, msg_id={sent_msg.message_id}, ack={sent_msg.ack_received}",
+                                level=6,
+                            )
+
+                        # Match on message ID and base callsign (to handle different SSIDs)
+                        sent_to_base = sent_msg.to_call.upper().split("-")[0]
+                        if (
+                            sent_msg.direction == "sent"
+                            and sent_msg.message_id == acked_msg_id
+                            and (sent_msg.to_call.upper() == from_call.upper()
+                                 or sent_to_base == from_call_base)
+                        ):
+                            sent_msg.ack_received = True
+                            found = True
+                            print_debug(
+                                f"parse_aprs_message: ✓ MATCHED - marked message ID '{acked_msg_id}' to {sent_msg.to_call} as acknowledged (ACK from {from_call})",
+                                level=5,
+                            )
+                            break
+
+                    if not found:
+                        print_debug(
+                            f"parse_aprs_message: ACK for '{acked_msg_id}' from {from_call} - no matching sent message found",
+                            level=5,
+                        )
+
+                return None  # Don't notify or add ACK messages to list
+
+            # Check if this is our own message digipeated back to us
+            # If so, treat it as proof of successful transmission (implicit ACK)
+            # NOTE: Only match exact callsign (with SSID). Different SSIDs are different
+            # stations (e.g., K1MAL-5 is HT, K1MAL-6 is console) and should communicate.
+            is_our_message = from_call.upper() == self.my_callsign
+
+            if is_our_message and digipeater_path:
+                # This is our own message coming back via digipeater(s)
+                # Could be a regular message (with message_id) or an ACK (without message_id)
+
+                if message_id:
+                    # Regular message with message ID
+                    print_debug(
+                        f"parse_aprs_message: received our own message via digipeater (ID={message_id}, path={digipeater_path})",
+                        level=5,
+                    )
+
+                    # Find and mark our sent message as digipeated
+                    found = False
+                    for sent_msg in self.messages:
+                        if (
+                            sent_msg.direction == "sent"
+                            and sent_msg.message_id == message_id
+                            and not sent_msg.digipeated  # Don't re-mark if already digipeated
+                        ):
+                            sent_msg.digipeated = True
+                            found = True
+                            print_debug(
+                                f"parse_aprs_message: ✓ DIGIPEATED - marked message ID '{message_id}' as digipeated (heard via {','.join(digipeater_path)})",
+                                level=5,
+                            )
+                            break
+
+                    if not found:
+                        print_debug(
+                            f"parse_aprs_message: Digipeated message ID '{message_id}' - no matching sent message found",
+                            level=5,
+                        )
+                else:
+                    # No message ID - could be an ACK we sent
+                    # ACKs have message text like "ackXXXXX" and are sent to the original sender
+                    print_debug(
+                        f"parse_aprs_message: received our own message via digipeater (no ID, to={to_call}, msg='{message_text}', path={digipeater_path})",
+                        level=5,
+                    )
+
+                    # Find matching ACK by to_call and message text
+                    found = False
+                    for sent_msg in self.messages:
+                        if (
+                            sent_msg.direction == "sent"
+                            and sent_msg.message_id is None  # ACKs don't have message IDs
+                            and sent_msg.to_call.upper() == to_call.upper()
+                            and sent_msg.message == message_text
+                            and not sent_msg.digipeated  # Don't re-mark if already digipeated
+                        ):
+                            sent_msg.digipeated = True
+                            # ACKs are considered "acknowledged" once digipeated (no ACK for ACKs)
+                            sent_msg.ack_received = True
+                            found = True
+                            print_debug(
+                                f"parse_aprs_message: ✓ DIGIPEATED - marked ACK to {to_call} as digipeated (heard via {','.join(digipeater_path)})",
+                                level=5,
+                            )
+                            break
+
+                    if not found:
+                        print_debug(
+                            f"parse_aprs_message: Digipeated message to {to_call} (no ID) - no matching sent ACK found",
+                            level=5,
+                        )
+
+                return None  # Don't add our own messages to the received list
+
+            # Create message object
+            msg = APRSMessage(
+                timestamp=datetime.now(),
+                from_call=from_call.upper(),
+                to_call=to_call.upper(),
+                message=message_text,
+                message_id=message_id,
+                read=False,
+            )
+
+            # Track station activity
+            sender_station = self._get_or_create_station(
+                from_call, relay_call, hop_count, digipeater_path=digipeater_path
+            )
+            sender_station.messages_sent += 1
+
+            # Track receiver if it's us
+            to_call_upper = to_call.upper()
+            if self.is_message_for_me(to_call):
+                # Message is to us - track as received by the sender
+                sender_station.messages_received += 1
+
+            # Always add to monitored messages (for monitoring all traffic)
+            self.monitored_messages.append(msg)
+
+            # Add to personal messages if addressed to us, ALL, or BSS callsign
+            is_for_me = self.is_message_for_me(to_call)
+            is_all = to_call_upper == "ALL"
+            is_bss = to_call_upper.startswith("BSS")
+            is_base = to_call_upper == self.my_callsign_base
+
+            print_debug(
+                f"parse_aprs_message: filtering - is_for_me={is_for_me}, is_all={is_all}, is_bss={is_bss}, is_base={is_base}",
+                level=5,
+            )
+
+            if is_for_me or is_all or is_bss or is_base:
+                # Check for duplicate before adding
+                is_duplicate = False
+                for existing_msg in self.messages:
+                    # Check if duplicate: same sender + (same message_id OR same content OR fuzzy match)
+                    if existing_msg.from_call == msg.from_call:
+                        if (
+                            message_id
+                            and existing_msg.message_id == message_id
+                        ):
+                            # Same sender, same message ID = duplicate
+                            is_duplicate = True
+                            print_debug(
+                                f"parse_aprs_message: duplicate detected (same message_id={message_id})",
+                                level=5,
+                            )
+                            break
+                        elif existing_msg.message == msg.message:
+                            # Same sender, same content = duplicate (for messages without IDs)
+                            is_duplicate = True
+                            print_debug(
+                                f"parse_aprs_message: duplicate detected (same content)",
+                                level=5,
+                            )
+                            break
+                        else:
+                            # Fuzzy duplicate detection: catches corrupted iGate packets
+                            # Check if message content is similar (one starts with the other)
+                            # and within a time window (30 seconds)
+                            time_diff = abs((msg.timestamp - existing_msg.timestamp).total_seconds())
+                            min_match_len = 20  # Minimum characters to match
+
+                            if time_diff < 30:  # Within 30 seconds
+                                # Check if messages have enough content to compare
+                                if len(existing_msg.message) >= min_match_len and len(msg.message) >= min_match_len:
+                                    # Check if one message starts with the other (fuzzy match)
+                                    if (existing_msg.message.startswith(msg.message[:min_match_len]) or
+                                        msg.message.startswith(existing_msg.message[:min_match_len])):
+                                        is_duplicate = True
+                                        print_debug(
+                                            f"parse_aprs_message: duplicate detected (fuzzy match, time_diff={time_diff:.1f}s)",
+                                            level=5,
+                                        )
+                                        break
+
+                if not is_duplicate:
+                    self.messages.append(msg)
+                    print_debug(
+                        f"parse_aprs_message: added to personal messages (count={len(self.messages)})",
+                        level=5,
+                    )
+
+                    # Broadcast message received to web clients
+                    self._broadcast_update('message_received', msg)
+
+                    return msg  # Return for notification
+                else:
+                    print_debug(
+                        f"parse_aprs_message: skipped duplicate message",
+                        level=5,
+                    )
+                    return None  # Don't notify for duplicates
+
+            print_debug(
+                f"parse_aprs_message: NOT added to personal messages (not for us)",
+                level=5,
+            )
+            return None  # Don't notify for messages not to us
+
+        except Exception:
+            return None
+
+    def parse_aprs_weather(
+        self,
+        station: str,
+        info: str,
+        relay_call: str = None,
+        hop_count: int = 999,
+        digipeater_path: List[str] = None,
+    ) -> Optional[APRSWeather]:
+        """Parse APRS weather data.
+
+        Supports position-with-weather formats:
+        - ! (position without timestamp)
+        - @ (position with timestamp)
+        - / (position with timestamp, no messaging)
+        - _ (weather report without position)
+
+        Args:
+            station: Station callsign
+            info: APRS information field
+            relay_call: Optional relay station (for third-party packets)
+            hop_count: Number of digipeater hops
+            digipeater_path: List of digipeater callsigns from AX.25 path
+
+        Returns:
+            APRSWeather if weather data found, None otherwise
+        """
+        if not info or info[0] not in ("!", "@", "/", "_"):
+            return None
+
+        try:
+            wx = APRSWeather(
+                timestamp=datetime.now(),
+                station=station.upper(),
+                raw_data=info,
+            )
+
+            # Check for weather data indicators
+            has_weather = False
+
+            # Look for weather fields (these are the typical indicators)
+            # Wind: c...s... (direction/speed) or g... (gust)
+            # Temp: t... (F)
+            # Rain: r... (last hour), p... (last 24h), P... (since midnight)
+            # Humidity: h... (00-99, 00 means 100%)
+            # Pressure: b..... (tenths of mbar)
+
+            # Simple pattern matching for common weather fields
+            # Allow variable digit counts and negative signs for temperature (t-3, t003, etc.)
+            if re.search(r"[csghpPb]\d{3}|t-?\d{1,3}|r\d{3}", info):
+                has_weather = True
+
+            if not has_weather:
+                return None
+
+            # Try to extract lat/lon (simplified - just check for valid position format)
+            # Full parsing would require comprehensive APRS position decoding
+            # For now, we'll extract what we can
+
+            # Extract weather values using regex
+
+            # Wind - two formats supported:
+            # Format 1: _ddd/sss (underscore, direction/speed)
+            match = re.search(r"_(\d{3})/(\d{3})", info)
+            if match:
+                wx.wind_direction = int(match.group(1))
+                wx.wind_speed = int(match.group(2))
+            else:
+                # Format 2: cdddsddd (compact form)
+                match = re.search(r"c(\d{3})s(\d{3})", info)
+                if match:
+                    wx.wind_direction = int(match.group(1))
+                    wx.wind_speed = int(match.group(2))
+
+            # Wind gust (g...) - mph
+            match = re.search(r"g(\d{3})", info)
+            if match:
+                wx.wind_gust = int(match.group(1))
+
+            # Temperature (t...) - Fahrenheit
+            # Allow 1-3 digits with optional minus sign (e.g., t-3, t-03, t-003, t003)
+            match = re.search(r"t(-?\d{1,3})", info)
+            if match:
+                temp = int(match.group(1))
+                # Negative temps in standard APRS use two's complement (e.g., 253 = -3)
+                # But some stations send explicit minus sign (e.g., -3)
+                if temp > 200:
+                    temp = temp - 256
+                wx.temperature = temp
+
+            # Rain last hour (r...) - hundredths of inches
+            match = re.search(r"r(\d{3})", info)
+            if match:
+                wx.rain_1h = int(match.group(1)) / 100.0
+
+            # Rain last 24h (p...) - hundredths of inches
+            match = re.search(r"p(\d{3})", info)
+            if match:
+                wx.rain_24h = int(match.group(1)) / 100.0
+
+            # Rain since midnight (P...) - hundredths of inches
+            match = re.search(r"P(\d{3})", info)
+            if match:
+                wx.rain_since_midnight = int(match.group(1)) / 100.0
+
+            # Humidity (h...) - percent (00 = 100%)
+            match = re.search(r"h(\d{2})", info)
+            if match:
+                humidity = int(match.group(1))
+                wx.humidity = 100 if humidity == 0 else humidity
+
+            # Barometric pressure (b.....) - auto-detect format
+            # Some stations use tenths of mb (b10130 = 1013.0 mb)
+            # Others use hundredths of inHg (b02979 = 29.79 inHg)
+            match = re.search(r"b(\d{5})", info)
+            if match:
+                raw_value = int(match.group(1))
+
+                # Try as tenths of millibars first
+                pressure_mb = raw_value / 10.0
+
+                # Sanity check: valid atmospheric pressure is 900-1100 mb
+                if 900 <= pressure_mb <= 1100:
+                    # Valid as millibars, use directly
+                    wx.pressure = pressure_mb
+                else:
+                    # Try as hundredths of inHg (US format)
+                    pressure_inhg = raw_value / 100.0
+
+                    # Sanity check: valid inHg range is 25-32 inHg
+                    if 25 <= pressure_inhg <= 32:
+                        # Valid as inHg, convert to millibars
+                        wx.pressure = pressure_inhg * 33.8639
+                    # else: invalid pressure, leave as None
+
+            # Store latest weather for this station
+            self.weather_reports[station.upper()] = wx
+
+            # Track station activity
+            sta = self._get_or_create_station(station, relay_call, hop_count, digipeater_path=digipeater_path)
+            sta.last_weather = wx
+            self._add_weather_to_history(sta, wx)
+
+            # Broadcast weather update to web clients
+            self._broadcast_update('weather_update', sta)
+
+            return wx
+
+        except Exception:
+            return None
+
+    def _add_weather_to_history(
+        self, station: APRSStation, weather: APRSWeather
+    ) -> None:
+        """Add weather report to station history with intelligent retention.
+
+        Three-tier retention policy:
+        - Last hour: ALL samples (full detail for current weather)
+        - 1 hour to 1 day: one sample every 15 minutes (recent trends)
+        - Older than 1 day: one sample per hour (long-term history)
+
+        Args:
+            station: Station to update
+            weather: New weather report to add
+        """
+        now = weather.timestamp
+        history = station.weather_history
+
+        # Calculate pressure tendency (3-hour change)
+        if weather.pressure is not None and history:
+            # Find weather report from ~3 hours ago
+            three_hours_ago = now - timedelta(hours=3)
+            tolerance = timedelta(minutes=30)  # ±30 min tolerance
+
+            for old_wx in reversed(history):
+                age = abs((old_wx.timestamp - three_hours_ago).total_seconds())
+                if age <= tolerance.total_seconds() and old_wx.pressure is not None:
+                    change = weather.pressure - old_wx.pressure
+                    weather.pressure_change_3h = change
+
+                    if change > 0.5:
+                        weather.pressure_tendency = 'rising'
+                    elif change < -0.5:
+                        weather.pressure_tendency = 'falling'
+                    else:
+                        weather.pressure_tendency = 'steady'
+                    break
+
+        # Always add the new report
+        history.append(weather)
+
+        # Sort by timestamp (newest first)
+        history.sort(key=lambda w: w.timestamp, reverse=True)
+
+        # Build retention list with three-tier policy
+        retained = []
+        last_15min = None
+        last_hour = None
+
+        for wx in history:
+            age = now - wx.timestamp
+
+            # Tier 1: Keep ALL reports from the last hour (full detail)
+            if age <= timedelta(hours=1):
+                retained.append(wx)
+            # Tier 2: 1 hour to 1 day - keep one sample every 15 minutes
+            elif age <= timedelta(days=1):
+                # Keep if no 15-min sample yet, or if 15+ min since last kept
+                if last_15min is None or (
+                    last_15min - wx.timestamp
+                ) >= timedelta(minutes=15):
+                    retained.append(wx)
+                    last_15min = wx.timestamp
+            # Tier 3: Older than 1 day - keep one sample per hour
+            else:
+                # Keep if no hourly sample yet, or if 1+ hour since last kept
+                if last_hour is None or (
+                    last_hour - wx.timestamp
+                ) >= timedelta(hours=1):
+                    retained.append(wx)
+                    last_hour = wx.timestamp
+
+        # Update history with retained samples
+        station.weather_history = retained
+
+    def _add_position_to_history(
+        self, station: APRSStation, position: APRSPosition
+    ) -> None:
+        """Add position report to station history with intelligent retention.
+
+        Retention policy optimized for tracking movement:
+        - Last hour: ALL positions (full movement detail)
+        - 1 hour to 1 day: Keep if position moved >100m OR 15+ min elapsed
+        - Older than 1 day: Keep if position moved >500m OR 1+ hour elapsed
+        - Maximum: 200 position points per station
+
+        Args:
+            station: Station to update
+            position: New position report to add
+        """
+        def distance_meters(lat1, lon1, lat2, lon2):
+            """Calculate distance between two coordinates in meters (Haversine formula)."""
+            R = 6371000  # Earth radius in meters
+            phi1 = math.radians(lat1)
+            phi2 = math.radians(lat2)
+            delta_phi = math.radians(lat2 - lat1)
+            delta_lambda = math.radians(lon2 - lon1)
+
+            a = math.sin(delta_phi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2) ** 2
+            c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+            return R * c
+
+        now = position.timestamp
+        history = station.position_history
+
+        # Always add the new position
+        history.append(position)
+
+        # Sort by timestamp (newest first)
+        history.sort(key=lambda p: p.timestamp, reverse=True)
+
+        # Build retention list with movement-based policy
+        retained = []
+        last_retained = None
+
+        for pos in history:
+            age = now - pos.timestamp
+
+            # Tier 1: Keep ALL positions from the last hour (full movement detail)
+            if age <= timedelta(hours=1):
+                retained.append(pos)
+                last_retained = pos
+            # Tier 2: 1 hour to 1 day - keep if moved >100m OR 15+ min elapsed
+            elif age <= timedelta(days=1):
+                if last_retained is None:
+                    retained.append(pos)
+                    last_retained = pos
+                else:
+                    dist = distance_meters(
+                        last_retained.latitude, last_retained.longitude,
+                        pos.latitude, pos.longitude
+                    )
+                    time_diff = last_retained.timestamp - pos.timestamp
+
+                    # Keep if significant movement OR enough time elapsed
+                    if dist > 100 or time_diff >= timedelta(minutes=15):
+                        retained.append(pos)
+                        last_retained = pos
+            # Tier 3: Older than 1 day - keep if moved >500m OR 1+ hour elapsed
+            else:
+                if last_retained is None:
+                    retained.append(pos)
+                    last_retained = pos
+                else:
+                    dist = distance_meters(
+                        last_retained.latitude, last_retained.longitude,
+                        pos.latitude, pos.longitude
+                    )
+                    time_diff = last_retained.timestamp - pos.timestamp
+
+                    # Keep if significant movement OR enough time elapsed
+                    if dist > 500 or time_diff >= timedelta(hours=1):
+                        retained.append(pos)
+                        last_retained = pos
+
+        # Limit to maximum 200 points to prevent unbounded growth
+        if len(retained) > 200:
+            retained = retained[:200]
+
+        # Update history with retained positions
+        station.position_history = retained
+
+    def get_unread_count(self) -> int:
+        """Get count of unread received messages.
+
+        Returns:
+            Number of unread received messages
+        """
+        return sum(
+            1
+            for msg in self.messages
+            if msg.direction == "received" and not msg.read
+        )
+
+    def mark_all_read(self) -> int:
+        """Mark all received messages as read.
+
+        Returns:
+            Number of messages marked as read
+        """
+        count = 0
+        for msg in self.messages:
+            if msg.direction == "received" and not msg.read:
+                msg.read = True
+                count += 1
+        return count
+
+    def clear_messages(self) -> int:
+        """Clear all messages (both sent and received).
+
+        Returns:
+            Number of messages cleared
+        """
+        count = len(self.messages)
+        self.messages.clear()
+        self.monitored_messages.clear()
+        return count
+
+    def add_sent_message(
+        self, to_call: str, message: str, message_id: str
+    ) -> APRSMessage:
+        """Add a sent message to the message list.
+
+        Args:
+            to_call: Destination callsign
+            message: Message text
+            message_id: Message ID for tracking acknowledgments
+
+        Returns:
+            The created message object
+        """
+        now = datetime.now()
+        msg = APRSMessage(
+            timestamp=now,
+            from_call=self.my_callsign,
+            to_call=to_call.upper(),
+            message=message,
+            message_id=message_id,
+            direction="sent",
+            ack_received=False,
+            failed=False,
+            retry_count=0,
+            last_sent=now,  # Track when message was sent for retry logic
+            read=True,  # Sent messages are always "read"
+        )
+
+        print_debug(
+            f"add_sent_message: tracking message to {to_call} with ID '{message_id}' (ack_received=False)",
+            level=5,
+        )
+
+        self.messages.append(msg)
+        self.monitored_messages.append(
+            msg
+        )  # Also add to monitored for database persistence
+        return msg
+
+    def get_pending_retries(self) -> List[APRSMessage]:
+        """Get messages that need to be retried using two-tier timeout system.
+
+        Returns messages that:
+        - Are sent messages
+        - Haven't been acknowledged
+        - Haven't failed
+        - Have exceeded the appropriate retry timeout since last send
+        - Haven't exceeded max retry count
+        - Are NOT ACKs (ACKs are never retried per APRS spec)
+
+        Two-tier retry system:
+        - Fast retries: For messages not yet digipeated (trying to get on RF)
+        - Slow retries: For messages digipeated but not ACKed (reminder to recipient)
+
+        Returns:
+            List of messages that should be retried
+        """
+        now = datetime.now()
+        pending = []
+
+        for msg in self.messages:
+            # Skip ACKs - they should never be retried (fire-and-forget per APRS spec)
+            # ACKs have two definitive characteristics:
+            # 1. message_id is None (ACKs don't have their own message IDs)
+            # 2. Message text matches pattern: "ack" + original message ID (1-5 chars)
+            # The message_id check is the strongest indicator since user messages ALWAYS have IDs
+            is_ack = (
+                msg.message_id is None  # Primary check: ACKs never have message IDs
+                and msg.message.lower().startswith("ack")  # Secondary validation
+                and len(msg.message) >= 4  # At minimum "ack" + 1 char
+                and len(msg.message) <= 8  # At maximum "ack" + 5 chars (APRS msg ID limit)
+            )
+
+            if (
+                msg.direction == "sent"
+                and not msg.ack_received
+                and not msg.failed
+                and not is_ack  # Don't retry ACKs!
+                and msg.last_sent is not None
+                and msg.retry_count < self.max_retries
+            ):
+
+                # Check if timeout has elapsed based on digipeater status
+                elapsed = (now - msg.last_sent).total_seconds()
+
+                # Two-tier retry: fast if not digipeated, slow if digipeated
+                if msg.digipeated:
+                    # Message made it to RF, use slow retry (remind recipient)
+                    timeout = self.retry_slow
+                else:
+                    # Message not heard digipeated yet, use fast retry (get on RF)
+                    timeout = self.retry_fast
+
+                if elapsed >= timeout:
+                    pending.append(msg)
+
+        return pending
+
+    def mark_message_failed(self, msg: APRSMessage):
+        """Mark a message as failed after max retries exceeded.
+
+        Args:
+            msg: Message to mark as failed
+        """
+        msg.failed = True
+
+    def check_expired_messages(self) -> List[APRSMessage]:
+        """Check for messages that have expired without acknowledgment.
+
+        Returns messages that:
+        - Are sent messages
+        - Haven't been acknowledged
+        - Haven't already been marked as failed
+        - Have reached max retry count
+        - Have exceeded the timeout period since last transmission
+
+        Uses two-tier timeout: fast for non-digipeated, slow for digipeated.
+
+        These messages should be marked as failed.
+
+        Returns:
+            List of expired messages
+        """
+        now = datetime.now()
+        expired = []
+
+        for msg in self.messages:
+            if (
+                msg.direction == "sent"
+                and not msg.ack_received
+                and not msg.failed
+                and msg.last_sent is not None
+                and msg.retry_count >= self.max_retries
+            ):
+                # Check if timeout has elapsed since final attempt
+                elapsed = (now - msg.last_sent).total_seconds()
+
+                # Use appropriate timeout based on digipeater status
+                timeout = self.retry_slow if msg.digipeated else self.retry_fast
+
+                if elapsed >= timeout:
+                    expired.append(msg)
+
+        return expired
+
+    def update_message_retry(self, msg: APRSMessage):
+        """Update message retry tracking after retransmission.
+
+        Args:
+            msg: Message that was just retransmitted
+        """
+        msg.retry_count += 1
+        msg.last_sent = datetime.now()
+
+        # Note: Do NOT mark as failed here - we need to wait for the timeout
+        # period after the last transmission to see if an ACK arrives.
+        # Failure is determined by check_expired_messages().
+
+    def get_messages(self, unread_only: bool = False) -> List[APRSMessage]:
+        """Get messages, optionally filtered.
+
+        Args:
+            unread_only: If True, only return unread messages
+
+        Returns:
+            List of messages
+        """
+        if unread_only:
+            return [msg for msg in self.messages if not msg.read]
+        return self.messages.copy()
+
+    def get_monitored_messages(
+        self, limit: Optional[int] = None
+    ) -> List[APRSMessage]:
+        """Get monitored messages (all APRS messages heard).
+
+        Args:
+            limit: Maximum number of messages to return (most recent), None for all
+
+        Returns:
+            List of monitored messages (most recent first if limited)
+        """
+        if limit:
+            return self.monitored_messages[-limit:]
+        return self.monitored_messages.copy()
+
+    def get_weather_stations(self, sort_by: str = "last") -> List[APRSWeather]:
+        """Get all weather reports with flexible sorting.
+
+        Args:
+            sort_by: Sort field - 'last' (default), 'name', 'temp', 'humidity', 'pressure'
+
+        Returns:
+            List of latest weather reports from each station
+        """
+        stations = list(self.weather_reports.values())
+
+        if sort_by == "name":
+            return sorted(stations, key=lambda x: x.station)
+        elif sort_by == "temp" or sort_by == "temperature":
+            # Sort by temperature, None values last
+            return sorted(
+                stations,
+                key=lambda x: (
+                    x.temperature is None,
+                    x.temperature if x.temperature is not None else 0,
+                ),
+                reverse=True,
+            )
+        elif sort_by == "humidity":
+            # Sort by humidity, None values last
+            return sorted(
+                stations,
+                key=lambda x: (
+                    x.humidity is None,
+                    x.humidity if x.humidity is not None else 0,
+                ),
+                reverse=True,
+            )
+        elif sort_by == "pressure":
+            # Sort by pressure, None values last
+            return sorted(
+                stations,
+                key=lambda x: (
+                    x.pressure is None,
+                    x.pressure if x.pressure is not None else 0,
+                ),
+                reverse=True,
+            )
+        elif sort_by == "last":
+            # Sort by timestamp (most recent first)
+            return sorted(stations, key=lambda x: x.timestamp, reverse=True)
+        else:
+            # Default to last heard
+            return sorted(stations, key=lambda x: x.timestamp, reverse=True)
+
+    def get_zambretti_forecast(self, callsign: str) -> Optional[Dict]:
+        """Generate Zambretti weather forecast for a station.
+
+        Args:
+            callsign: Station callsign to generate forecast for
+
+        Returns:
+            Dictionary with forecast data or None if insufficient data:
+            {
+                'code': 'A-Z',
+                'forecast': 'Forecast text',
+                'pressure': float,
+                'trend': 'rising/falling/steady',
+                'confidence': 'high/medium/low',
+                'wind_dir': int or None
+            }
+        """
+        station = self.stations.get(callsign.upper())
+        if not station or not station.last_weather:
+            return None
+
+        weather = station.last_weather
+
+        # Need pressure for Zambretti
+        if weather.pressure is None:
+            return None
+
+        # Calculate pressure trend from weather history
+        trend = 'steady'
+        confidence = 'low'
+
+        if len(station.weather_history) >= 2:
+            # Look for pressure readings in the last 3-6 hours
+            now = datetime.now()
+            recent_readings = []
+
+            for wx in station.weather_history:
+                if wx.pressure is not None:
+                    age_hours = (now - wx.timestamp).total_seconds() / 3600
+                    if age_hours <= 6:  # Last 6 hours
+                        recent_readings.append((wx.timestamp, wx.pressure))
+
+            if len(recent_readings) >= 2:
+                # Sort by timestamp
+                recent_readings.sort(key=lambda x: x[0])
+
+                # Compare oldest and newest in window
+                old_pressure = recent_readings[0][1]
+                new_pressure = recent_readings[-1][1]
+                time_diff_hours = (recent_readings[-1][0] - recent_readings[0][0]).total_seconds() / 3600
+
+                # Calculate trend (need at least 1 hour of data for reliable trend)
+                if time_diff_hours >= 1:
+                    pressure_change = new_pressure - old_pressure
+                    hourly_rate = pressure_change / time_diff_hours
+
+                    # Thresholds based on meteorological standards
+                    # Rising/falling: > ±0.5 mb/hr is significant
+                    # Rapid: > ±1.5 mb/hr
+                    if abs(hourly_rate) < 0.15:
+                        trend = 'steady'
+                        confidence = 'high' if time_diff_hours >= 3 else 'medium'
+                    elif hourly_rate > 0:
+                        trend = 'rising'
+                        confidence = 'high' if time_diff_hours >= 3 else 'medium'
+                    else:
+                        trend = 'falling'
+                        confidence = 'high' if time_diff_hours >= 3 else 'medium'
+
+        # Get current month for seasonal adjustment
+        current_month = datetime.now().month
+
+        # Get wind direction (optional for Zambretti)
+        wind_dir = weather.wind_direction
+
+        # Calculate Zambretti code
+        # Note: Pressures from PWS are already sea-level adjusted
+        zambretti_code = calculate_zambretti_code(
+            sea_level_pressure_mb=weather.pressure,
+            pressure_trend=trend,
+            wind_direction=wind_dir,
+            month=current_month,
+            hemisphere='N'  # TODO: Could be determined from station latitude
+        )
+
+        forecast_text = ZAMBRETTI_FORECASTS.get(zambretti_code, 'Unknown')
+
+        return {
+            'code': zambretti_code,
+            'forecast': forecast_text,
+            'pressure': weather.pressure,
+            'trend': trend,
+            'confidence': confidence,
+            'wind_dir': wind_dir
+        }
+
+    def format_message(self, msg: APRSMessage, index: int = None) -> str:
+        """Format message for display.
+
+        Args:
+            msg: Message to format
+            index: Optional message index number
+
+        Returns:
+            Formatted message string
+        """
+        time_str = msg.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+
+        prefix = f"[{index}] " if index is not None else ""
+
+        # Format based on direction
+        if msg.direction == "sent":
+            # Sent message - show ACK status and recipient
+            ack_mark = "✓" if msg.ack_received else "⋯"
+            status_color = "green" if msg.ack_received else "yellow"
+            return f"{prefix}[{ack_mark}] {time_str} To: {msg.to_call}\n  {msg.message}"
+        else:
+            # Received message - show read status and sender
+            status = "NEW" if not msg.read else "READ"
+            msg_id_str = f" {{{{msg_id}}}}" if msg.message_id else ""
+            return f"{prefix}[{status}] {time_str} From: {msg.from_call}\n  {msg.message}{msg_id_str}"
+
+    def format_weather(self, wx: APRSWeather) -> Dict[str, str]:
+        """Format weather report for display.
+
+        Args:
+            wx: Weather report
+
+        Returns:
+            Dictionary of formatted weather fields
+        """
+        return {
+            "station": wx.station,
+            "time": wx.timestamp.strftime("%H:%M:%S"),
+            "temp": (
+                f"{wx.temperature}°F" if wx.temperature is not None else "---"
+            ),
+            "humidity": (
+                f"{wx.humidity}%" if wx.humidity is not None else "---"
+            ),
+            "wind": self._format_wind(wx),
+            "pressure": (
+                f"{wx.pressure} mb" if wx.pressure is not None else "---"
+            ),
+            "rain_1h": f'{wx.rain_1h}"' if wx.rain_1h is not None else "---",
+        }
+
+    def _format_wind(self, wx: APRSWeather) -> str:
+        """Format wind information.
+
+        Args:
+            wx: Weather report
+
+        Returns:
+            Formatted wind string
+        """
+        if wx.wind_speed is None:
+            return "---"
+
+        result = f"{wx.wind_speed} mph"
+
+        if wx.wind_direction is not None:
+            # Convert degrees to compass direction
+            directions = [
+                "N",
+                "NNE",
+                "NE",
+                "ENE",
+                "E",
+                "ESE",
+                "SE",
+                "SSE",
+                "S",
+                "SSW",
+                "SW",
+                "WSW",
+                "W",
+                "WNW",
+                "NW",
+                "NNW",
+            ]
+            index = round(wx.wind_direction / 22.5) % 16
+            result = f"{directions[index]} {result}"
+
+        if wx.wind_gust is not None and wx.wind_gust > 0:
+            result += f" (gust {wx.wind_gust})"
+
+        return result
+
+    @staticmethod
+    def latlon_to_maidenhead(lat: float, lon: float) -> str:
+        """Convert latitude/longitude to 6-digit Maidenhead grid square.
+
+        Args:
+            lat: Latitude in decimal degrees (-90 to +90)
+            lon: Longitude in decimal degrees (-180 to +180)
+
+        Returns:
+            6-character Maidenhead grid square (e.g., "FN31pr")
+        """
+        # Adjust longitude to 0-360 range
+        lon_adj = lon + 180
+        lat_adj = lat + 90
+
+        # Field (first 2 chars): 20° lon x 10° lat
+        field_lon = int(lon_adj / 20)
+        field_lat = int(lat_adj / 10)
+
+        # Square (next 2 digits): 2° lon x 1° lat within field
+        square_lon = int((lon_adj % 20) / 2)
+        square_lat = int((lat_adj % 10) / 1)
+
+        # Subsquare (last 2 chars): 5' lon x 2.5' lat within square
+        # 2° = 120', so 120/24 = 5' per subsquare
+        # 1° = 60', so 60/24 = 2.5' per subsquare
+        subsq_lon = int(((lon_adj % 2) * 60) / 5)
+        subsq_lat = int(((lat_adj % 1) * 60) / 2.5)
+
+        # Build grid square string
+        grid = (
+            chr(ord("A") + field_lon)
+            + chr(ord("A") + field_lat)
+            + str(square_lon)
+            + str(square_lat)
+            + chr(ord("a") + subsq_lon)
+            + chr(ord("a") + subsq_lat)
+        )
+
+        return grid
+
+    @staticmethod
+    def maidenhead_to_latlon(grid: str) -> tuple:
+        """Convert Maidenhead grid square to latitude/longitude (center of grid).
+
+        Supports 2-10 character grid squares:
+        - 2 chars: Field (20° x 10°) e.g., "FN"
+        - 4 chars: Square (2° x 1°) e.g., "FN31"
+        - 6 chars: Subsquare (5' x 2.5') e.g., "FN31pr"
+        - 8 chars: Extended subsquare (12.5" x 6.25") e.g., "FN31pr34"
+        - 10 chars: Super extended (0.52" x 0.26") e.g., "FN31pr34ab"
+
+        Args:
+            grid: Maidenhead grid square (2-10 characters)
+
+        Returns:
+            Tuple of (latitude, longitude) in decimal degrees, representing
+            the center of the grid square.
+
+        Raises:
+            ValueError: If grid square format is invalid
+        """
+        grid = grid.upper()
+        grid_len = len(grid)
+
+        if grid_len < 2 or grid_len > 10 or grid_len % 2 != 0:
+            raise ValueError(
+                f"Grid square must be 2, 4, 6, 8, or 10 characters, got {grid_len}"
+            )
+
+        # Field (characters 0-1): A-R for lon, A-R for lat
+        if not (grid[0].isalpha() and grid[1].isalpha()):
+            raise ValueError(f"First 2 characters must be letters: {grid[:2]}")
+
+        field_lon = ord(grid[0]) - ord('A')
+        field_lat = ord(grid[1]) - ord('A')
+
+        if field_lon < 0 or field_lon > 17 or field_lat < 0 or field_lat > 17:
+            raise ValueError(f"Field must be A-R: {grid[:2]}")
+
+        lon = field_lon * 20 - 180
+        lat = field_lat * 10 - 90
+
+        # Square (characters 2-3): 0-9 for lon, 0-9 for lat
+        if grid_len >= 4:
+            if not (grid[2].isdigit() and grid[3].isdigit()):
+                raise ValueError(f"Characters 3-4 must be digits: {grid[2:4]}")
+
+            square_lon = int(grid[2])
+            square_lat = int(grid[3])
+            lon += square_lon * 2
+            lat += square_lat * 1
+
+        # Subsquare (characters 4-5): a-x for lon, a-x for lat
+        if grid_len >= 6:
+            grid_lower = grid[4:6].lower()
+            if not (grid_lower[0].isalpha() and grid_lower[1].isalpha()):
+                raise ValueError(f"Characters 5-6 must be letters: {grid[4:6]}")
+
+            subsq_lon = ord(grid_lower[0]) - ord('a')
+            subsq_lat = ord(grid_lower[1]) - ord('a')
+
+            if subsq_lon < 0 or subsq_lon > 23 or subsq_lat < 0 or subsq_lat > 23:
+                raise ValueError(f"Subsquare must be a-x: {grid[4:6]}")
+
+            lon += subsq_lon * (2.0 / 24)  # 5 arc-minutes
+            lat += subsq_lat * (1.0 / 24)  # 2.5 arc-minutes
+
+        # Extended subsquare (characters 6-7): 0-9 for lon, 0-9 for lat
+        if grid_len >= 8:
+            if not (grid[6].isdigit() and grid[7].isdigit()):
+                raise ValueError(f"Characters 7-8 must be digits: {grid[6:8]}")
+
+            ext_lon = int(grid[6])
+            ext_lat = int(grid[7])
+            lon += ext_lon * (2.0 / 240)  # 30 arc-seconds
+            lat += ext_lat * (1.0 / 240)  # 15 arc-seconds
+
+        # Super extended subsquare (characters 8-9): a-x for lon, a-x for lat
+        if grid_len >= 10:
+            grid_lower = grid[8:10].lower()
+            if not (grid_lower[0].isalpha() and grid_lower[1].isalpha()):
+                raise ValueError(f"Characters 9-10 must be letters: {grid[8:10]}")
+
+            super_lon = ord(grid_lower[0]) - ord('a')
+            super_lat = ord(grid_lower[1]) - ord('a')
+
+            if super_lon < 0 or super_lon > 23 or super_lat < 0 or super_lat > 23:
+                raise ValueError(f"Super extended must be a-x: {grid[8:10]}")
+
+            lon += super_lon * (2.0 / 5760)  # 1.25 arc-seconds
+            lat += super_lat * (1.0 / 5760)  # 0.625 arc-seconds
+
+        # Return center of grid square by adding half the precision
+        if grid_len == 2:
+            lon += 10  # Half of 20°
+            lat += 5   # Half of 10°
+        elif grid_len == 4:
+            lon += 1   # Half of 2°
+            lat += 0.5 # Half of 1°
+        elif grid_len == 6:
+            lon += (2.0 / 48)  # Half of 5'
+            lat += (1.0 / 48)  # Half of 2.5'
+        elif grid_len == 8:
+            lon += (2.0 / 480)  # Half of 30"
+            lat += (1.0 / 480)  # Half of 15"
+        elif grid_len == 10:
+            lon += (2.0 / 11520) # Half of 1.25"
+            lat += (1.0 / 11520) # Half of 0.625"
+
+        return (lat, lon)
+
+    @staticmethod
+    def calculate_dew_point(temp_f: float, humidity: int) -> Optional[float]:
+        """Calculate dew point from temperature and humidity using Magnus formula.
+
+        Args:
+            temp_f: Temperature in Fahrenheit
+            humidity: Relative humidity percentage (0-100)
+
+        Returns:
+            Dew point in Fahrenheit, or None if invalid inputs
+        """
+        if temp_f is None or humidity is None or humidity < 0 or humidity > 100:
+            return None
+
+        # Convert F to C for calculation
+        temp_c = (temp_f - 32) * 5.0 / 9.0
+
+        # Magnus formula constants
+        a = 17.27
+        b = 237.3
+
+        # Calculate gamma
+        alpha = ((a * temp_c) / (b + temp_c)) + math.log(humidity / 100.0)
+
+        # Calculate dew point in Celsius
+        dew_point_c = (b * alpha) / (a - alpha)
+
+        # Convert back to Fahrenheit
+        dew_point_f = (dew_point_c * 9.0 / 5.0) + 32
+
+        return dew_point_f
+
+    def _parse_compressed_position(
+        self,
+        info: str,
+        offset: int,
+        station: str,
+        relay_call: str = None,
+        hop_count: int = 999,
+        digipeater_path: List[str] = None,
+        dest_addr: str = None,
+    ) -> Optional[APRSPosition]:
+        """Parse APRS compressed position format.
+
+        Compressed format: /YYYYXXXX$csT
+        - / or \ = symbol table (1 byte)
+        - YYYY = compressed latitude (4 bytes, base-91)
+        - XXXX = compressed longitude (4 bytes, base-91)
+        - $ = symbol code (1 byte)
+        - cs = compressed course/speed or other data (1-2 bytes)
+        - T = compression type byte (1 byte)
+
+        Args:
+            info: APRS info field
+            offset: Start offset of position data
+            station: Station callsign
+            relay_call: Optional relay station
+            hop_count: Number of digipeater hops
+            digipeater_path: List of digipeater callsigns
+            dest_addr: Destination address
+
+        Returns:
+            APRSPosition if valid, None otherwise
+        """
+        try:
+            if len(info) < offset + 13:  # Minimum: symbol_table + lat(4) + lon(4) + symbol + cs + T
+                return None
+
+            # Extract components
+            symbol_table = info[offset]
+            lat_compressed = info[offset + 1:offset + 5]
+            lon_compressed = info[offset + 5:offset + 9]
+            symbol_code = info[offset + 9]
+
+            # Optional: compressed course/speed and type byte
+            # We'll extract the comment starting after the compression type byte
+            # The compression type byte is typically at offset+10, but we'll be lenient
+
+            # Decode base-91 coordinates
+            # Base-91 uses ASCII 33-124 (! to |)
+            def base91_decode(s):
+                """Decode 4-character base-91 string to integer."""
+                result = 0
+                for i, c in enumerate(s):
+                    val = ord(c) - 33
+                    if val < 0 or val > 90:
+                        return None
+                    result = result * 91 + val
+                return result
+
+            lat_val = base91_decode(lat_compressed)
+            lon_val = base91_decode(lon_compressed)
+
+            if lat_val is None or lon_val is None:
+                return None
+
+            # Convert to decimal degrees
+            # Latitude: 90 - (lat_val / 380926)
+            # Longitude: -180 + (lon_val / 190463)
+            latitude = 90.0 - (lat_val / 380926.0)
+            longitude = -180.0 + (lon_val / 190463.0)
+
+            # Validate coordinates
+            if latitude < -90 or latitude > 90 or longitude < -180 or longitude > 180:
+                return None
+
+            # Filter out Null Island
+            if latitude == 0.0 and longitude == 0.0:
+                return None
+
+            # Extract comment (skip compression type byte and optional data)
+            # Typically comment starts at offset+13
+            comment = info[offset + 13:].strip() if len(info) > offset + 13 else ""
+
+            # Convert to Maidenhead grid square
+            grid_square = self.latlon_to_maidenhead(latitude, longitude)
+
+            # Identify device type
+            device_str = None
+            if dest_addr:
+                try:
+                    device_id = get_device_identifier()
+                    device_info = device_id.identify_by_tocall(dest_addr)
+                    if device_info:
+                        device_str = str(device_info)
+                except Exception:
+                    pass
+
+            pos = APRSPosition(
+                timestamp=datetime.now(),
+                station=station.upper(),
+                latitude=latitude,
+                longitude=longitude,
+                symbol_table=symbol_table,
+                symbol_code=symbol_code,
+                comment=comment,
+                grid_square=grid_square,
+                device=device_str,
+            )
+
+            # Store latest position
+            self.position_reports[station.upper()] = pos
+
+            # Track station activity
+            sta = self._get_or_create_station(station, relay_call, hop_count, digipeater_path=digipeater_path)
+            sta.last_position = pos
+            if device_str:
+                sta.device = device_str
+            self._add_position_to_history(sta, pos)
+
+            # Broadcast update
+            self._broadcast_update('station_update', sta)
+
+            return pos
+
+        except Exception as e:
+            # Silently fail for invalid compressed data
+            return None
+
+    def parse_aprs_position(
+        self,
+        station: str,
+        info: str,
+        relay_call: str = None,
+        hop_count: int = 999,
+        digipeater_path: List[str] = None,
+        dest_addr: str = None,
+    ) -> Optional[APRSPosition]:
+        """Parse APRS position report.
+
+        Supports formats:
+        - ! (position without timestamp)
+        - @ (position with timestamp)
+        - / (position with timestamp, no messaging)
+        - = (position without timestamp, with messaging)
+
+        Supports both uncompressed and compressed position formats.
+
+        Args:
+            station: Station callsign
+            info: APRS information field
+            relay_call: Optional relay station (for third-party packets)
+            hop_count: Number of digipeater hops
+            digipeater_path: List of digipeater callsigns from AX.25 path
+            dest_addr: Destination address (for device identification)
+
+        Returns:
+            APRSPosition if position data found, None otherwise
+        """
+        if not info or info[0] not in ("!", "@", "/", "="):
+            return None
+
+        try:
+            # Skip timestamp if present (@ and / formats have 7-char timestamp)
+            offset = 0
+            if info[0] in ("@", "/"):
+                offset = 8  # 1 (type) + 7 (timestamp)
+            else:
+                offset = 1  # Just skip type character
+
+            # Check if this is compressed format
+            # Compressed format: symbol_table(1) + lat(4) + lon(4) + symbol(1) + compressed_type(1) = 11 bytes minimum
+            # Uncompressed format: lat(8) + symbol_table(1) + lon(9) + symbol(1) = 19 bytes minimum
+            if len(info) >= offset + 13:  # Minimum for compressed
+                # Check for compressed format: symbol table char followed by base-91 chars
+                symbol_table_char = info[offset]
+                # Compressed format uses symbol tables / or \, followed by base-91 encoded data
+                if symbol_table_char in ('/', '\\') and len(info) >= offset + 13:
+                    # Try to parse as compressed
+                    result = self._parse_compressed_position(info, offset, station, relay_call, hop_count, digipeater_path, dest_addr)
+                    if result:
+                        return result
+                    # If compressed parsing failed, fall through to try uncompressed
+
+            if len(info) < offset + 19:  # Need at least lat/lon/symbol for uncompressed
+                return None
+
+            # Parse position data
+            # Format: DDMMmmN$DDDMMmmW# where $ is symbol table, # is symbol code
+            # Example: 4210.45N/07153.00W> (/ is symbol table, > is symbol code)
+            # Symbol table can be / \ or any printable ASCII character
+            lat_str = info[offset : offset + 8]  # DDMMmmN or DDMMmmS
+            lon_str = info[offset + 9 : offset + 18]  # DDDMMmmW or DDDMMmmE
+
+            # Extract symbol table and code
+            symbol_table = info[offset + 8] if offset + 8 < len(info) else "/"
+            symbol_code = info[offset + 18] if offset + 18 < len(info) else ">"
+
+            # Parse latitude (DDMMmmN/S format)
+            try:
+                lat_deg = int(lat_str[0:2])
+                lat_min = float(lat_str[2:7])
+                lat_dir = lat_str[7]
+                latitude = lat_deg + (lat_min / 60.0)
+                if lat_dir in ("S", "s"):
+                    latitude = -latitude
+            except (ValueError, IndexError):
+                return None
+
+            # Parse longitude (DDDMMmmW/E format)
+            try:
+                lon_deg = int(lon_str[0:3])
+                lon_min = float(lon_str[3:8])
+                lon_dir = lon_str[8]
+                longitude = lon_deg + (lon_min / 60.0)
+                if lon_dir in ("W", "w"):
+                    longitude = -longitude
+            except (ValueError, IndexError):
+                return None
+
+            # Extract comment (everything after symbol code)
+            comment = (
+                info[offset + 19 :].strip() if len(info) > offset + 19 else ""
+            )
+
+            # Convert to Maidenhead grid square
+            grid_square = self.latlon_to_maidenhead(latitude, longitude)
+
+            # Filter out invalid "Null Island" coordinates (0.0, 0.0)
+            if latitude == 0.0 and longitude == 0.0:
+                print_debug(
+                    f"parse_position: Rejecting Null Island coordinates from {station}",
+                    level=5,
+                )
+                return None
+
+            # Identify device type from destination callsign (tocall)
+            device_str = None
+            if dest_addr:
+                try:
+                    device_id = get_device_identifier()
+                    device_info = device_id.identify_by_tocall(dest_addr)
+                    if device_info:
+                        device_str = str(device_info)
+                except Exception:
+                    pass  # Silently ignore device ID errors
+
+            pos = APRSPosition(
+                timestamp=datetime.now(),
+                station=station.upper(),
+                latitude=latitude,
+                longitude=longitude,
+                symbol_table=symbol_table,
+                symbol_code=symbol_code,
+                comment=comment,
+                grid_square=grid_square,
+                device=device_str,
+            )
+
+            # Store latest position for this station
+            self.position_reports[station.upper()] = pos
+
+            # Track station activity
+            sta = self._get_or_create_station(station, relay_call, hop_count, digipeater_path=digipeater_path)
+            sta.last_position = pos
+            if device_str:
+                sta.device = device_str
+            self._add_position_to_history(sta, pos)
+
+            # Broadcast station update to web clients
+            self._broadcast_update('station_update', sta)
+
+            return pos
+
+        except Exception:
+            return None
+
+    def parse_aprs_object(
+        self,
+        station: str,
+        info: str,
+        relay_call: str = None,
+        hop_count: int = 999,
+        digipeater_path: List[str] = None,
+    ) -> Optional[APRSPosition]:
+        """Parse APRS object report.
+
+        Format: ;OBJECTNAM*DDHHMMzLATITUDEsLONGITUDEsCOMMENT
+        Object name is 9 characters (padded with spaces)
+        Status is * (live) or _ (killed)
+
+        Args:
+            station: Station that sent the object
+            info: APRS information field
+            relay_call: Optional relay station (for third-party packets)
+
+        Returns:
+            APRSPosition if object contains position data, None otherwise
+        """
+        if not info or info[0] != ";":
+            return None
+
+        try:
+            # Extract object name (9 chars) and status (* or _)
+            if len(info) < 11:  # ; + 9-char name + *
+                return None
+
+            object_name = info[1:10].strip()  # 9-character object name
+            status = info[10]  # * (live) or _ (killed)
+
+            if status not in ("*", "_"):
+                return None
+
+            # Killed objects just announce removal, no position data needed
+            if status == "_":
+                return None
+
+            # Parse timestamp (7 chars: DDHHMMz)
+            if len(info) < 18:  # Need at least: ; + 9 + * + 7
+                return None
+
+            timestamp_str = info[11:18]  # DDHHMMz format
+            offset = 18  # Start of position data
+
+            if len(info) < offset + 19:  # Need at least lat/lon/symbol
+                return None
+
+            # Parse position data (same format as regular position reports)
+            lat_str = info[offset : offset + 8]  # DDMMmmN or DDMMmmS
+            lon_str = info[offset + 9 : offset + 18]  # DDDMMmmW or DDDMMmmE
+
+            # Extract symbol table and code
+            symbol_table = info[offset + 8] if offset + 8 < len(info) else "/"
+            symbol_code = info[offset + 18] if offset + 18 < len(info) else ">"
+
+            # Parse latitude (DDMMmmN/S format)
+            try:
+                lat_deg = int(lat_str[0:2])
+                lat_min = float(lat_str[2:7])
+                lat_dir = lat_str[7]
+                latitude = lat_deg + (lat_min / 60.0)
+                if lat_dir in ("S", "s"):
+                    latitude = -latitude
+            except (ValueError, IndexError):
+                return None
+
+            # Parse longitude (DDDMMmmW/E format)
+            try:
+                lon_deg = int(lon_str[0:3])
+                lon_min = float(lon_str[3:8])
+                lon_dir = lon_str[8]
+                longitude = lon_deg + (lon_min / 60.0)
+                if lon_dir in ("W", "w"):
+                    longitude = -longitude
+            except (ValueError, IndexError):
+                return None
+
+            # Extract comment (everything after symbol code)
+            comment = (
+                info[offset + 19 :].strip() if len(info) > offset + 19 else ""
+            )
+
+            # Convert to Maidenhead grid square
+            grid_square = self.latlon_to_maidenhead(latitude, longitude)
+
+            # Create position object using the OBJECT name as the station
+            pos = APRSPosition(
+                timestamp=datetime.now(),
+                station=object_name.upper(),  # Use object name, not sender
+                latitude=latitude,
+                longitude=longitude,
+                symbol_table=symbol_table,
+                symbol_code=symbol_code,
+                comment=comment,
+                grid_square=grid_square,
+            )
+
+            # Store latest position for this object
+            self.position_reports[object_name.upper()] = pos
+
+            # Track as station (objects are tracked like stations)
+            sta = self._get_or_create_station(
+                object_name, relay_call, hop_count
+            )
+            sta.last_position = pos
+            self._add_position_to_history(sta, pos)
+
+            # Broadcast station update to web clients
+            self._broadcast_update('station_update', sta)
+
+            return pos
+
+        except Exception:
+            return None
+
+    def parse_aprs_status(
+        self,
+        station: str,
+        info: str,
+        relay_call: str = None,
+        hop_count: int = 999,
+        digipeater_path: List[str] = None,
+    ) -> Optional[APRSStatus]:
+        """Parse APRS status report.
+
+        Status format: >Status text here
+
+        Args:
+            station: Station callsign
+            info: APRS info field
+            relay_call: Optional relay station callsign
+
+        Returns:
+            APRSStatus object if valid, None otherwise
+        """
+        try:
+            if not info or info[0] != ">":
+                return None
+
+            # Extract status text (everything after >)
+            status_text = info[1:].strip()
+
+            if not status_text:
+                return None
+
+            # Create status object
+            status = APRSStatus(
+                timestamp=datetime.now(),
+                station=station.upper(),
+                status_text=status_text,
+            )
+
+            # Track as station
+            sta = self._get_or_create_station(station, relay_call, hop_count, digipeater_path=digipeater_path)
+            sta.last_status = status
+
+            return status
+
+        except Exception:
+            return None
+
+    def parse_aprs_item(
+        self,
+        station: str,
+        info: str,
+        relay_call: str = None,
+        hop_count: int = 999,
+        digipeater_path: List[str] = None,
+    ) -> Optional[APRSPosition]:
+        """Parse APRS item report.
+
+        Item format: )NAME!lat/lonSymbol...
+        Items are like objects but with 3-9 character names (not fixed at 9)
+
+        Args:
+            station: Station callsign that placed the item
+            info: APRS info field
+            relay_call: Optional relay station callsign
+
+        Returns:
+            APRSPosition object if valid, None otherwise
+        """
+        try:
+            if not info or info[0] != ")":
+                return None
+
+            # Find the position marker (! or _)
+            pos_marker_idx = -1
+            for i, c in enumerate(info[1:], 1):
+                if c in ("!", "_"):
+                    pos_marker_idx = i
+                    break
+
+            if pos_marker_idx == -1:
+                return None
+
+            # Extract item name (3-9 chars between ) and !)
+            item_name = info[1:pos_marker_idx].strip()
+            if not item_name or len(item_name) < 3 or len(item_name) > 9:
+                return None
+
+            # Parse position (same format as standard position)
+            # Position starts after the marker
+            offset = pos_marker_idx + 1
+
+            # Need at least lat (8) + symbol table (1) + lon (9) + symbol code (1) = 19 chars
+            if len(info) < offset + 19:
+                return None
+
+            # Parse latitude: DDMM.MMN (8 chars)
+            lat_str = info[offset : offset + 8]
+            symbol_table = info[offset + 8]
+            lon_str = info[offset + 9 : offset + 18]
+            symbol_code = info[offset + 18]
+
+            # Convert lat/lon
+            try:
+                lat_deg = int(lat_str[0:2])
+                lat_min = float(lat_str[2:7])
+                lat_dir = lat_str[7]
+                latitude = lat_deg + (lat_min / 60.0)
+                if lat_dir in ("S", "s"):
+                    latitude = -latitude
+
+                lon_deg = int(lon_str[0:3])
+                lon_min = float(lon_str[3:8])
+                lon_dir = lon_str[8]
+                longitude = lon_deg + (lon_min / 60.0)
+                if lon_dir in ("W", "w"):
+                    longitude = -longitude
+            except (ValueError, IndexError):
+                return None
+
+            # Extract comment (everything after symbol code)
+            comment = (
+                info[offset + 19 :].strip() if len(info) > offset + 19 else ""
+            )
+
+            # Convert to Maidenhead grid square
+            grid_square = self.latlon_to_maidenhead(latitude, longitude)
+
+            # Create position object using the ITEM name as the station
+            pos = APRSPosition(
+                timestamp=datetime.now(),
+                station=item_name.upper(),  # Use item name, not sender
+                latitude=latitude,
+                longitude=longitude,
+                symbol_table=symbol_table,
+                symbol_code=symbol_code,
+                comment=comment,
+                grid_square=grid_square,
+            )
+
+            # Store latest position for this item
+            self.position_reports[item_name.upper()] = pos
+
+            # Track as station (items are tracked like stations)
+            sta = self._get_or_create_station(item_name, relay_call, hop_count, digipeater_path=digipeater_path)
+            sta.last_position = pos
+
+            return pos
+
+        except Exception:
+            return None
+
+    def parse_aprs_telemetry(
+        self,
+        station: str,
+        info: str,
+        relay_call: str = None,
+        hop_count: int = 999,
+        digipeater_path: List[str] = None,
+    ) -> Optional[APRSTelemetry]:
+        """Parse APRS telemetry packet.
+
+        Telemetry format: T#SSS,A1,A2,A3,A4,A5,BBBBBBBB
+        SSS = sequence number (000-999)
+        A1-A5 = analog values (000-255)
+        BBBBBBBB = 8 digital bits (0/1)
+
+        Args:
+            station: Station callsign
+            info: APRS info field
+            relay_call: Optional relay station callsign
+
+        Returns:
+            APRSTelemetry object if valid, None otherwise
+        """
+        try:
+            if not info or not info.startswith("T#"):
+                return None
+
+            # Remove T# prefix
+            data = info[2:].strip()
+
+            # Split by comma
+            parts = data.split(",")
+
+            # Need exactly 7 parts: sequence + 5 analog + digital
+            if len(parts) != 7:
+                return None
+
+            # Parse sequence number
+            try:
+                sequence = int(parts[0])
+                if sequence < 0 or sequence > 999:
+                    return None
+            except ValueError:
+                return None
+
+            # Parse analog values (5 channels)
+            analog = []
+            for i in range(1, 6):
+                try:
+                    val = int(parts[i])
+                    if val < 0 or val > 255:
+                        return None
+                    analog.append(val)
+                except ValueError:
+                    return None
+
+            # Parse digital bits (8 bits)
+            digital = parts[6].strip()
+            if len(digital) != 8 or not all(c in "01" for c in digital):
+                return None
+
+            # Create telemetry object
+            telemetry = APRSTelemetry(
+                timestamp=datetime.now(),
+                station=station.upper(),
+                sequence=sequence,
+                analog=analog,
+                digital=digital,
+            )
+
+            # Track as station
+            sta = self._get_or_create_station(station, relay_call, hop_count, digipeater_path=digipeater_path)
+            sta.last_telemetry = telemetry
+
+            # Keep recent telemetry history (last 20 packets)
+            sta.telemetry_sequence.append(telemetry)
+            if len(sta.telemetry_sequence) > 20:
+                sta.telemetry_sequence.pop(0)
+
+            return telemetry
+
+        except Exception:
+            return None
+
+    def get_position_reports(self) -> List[APRSPosition]:
+        """Get all position reports, sorted by station.
+
+        Returns:
+            List of latest position reports from each station
+        """
+        return sorted(self.position_reports.values(), key=lambda x: x.station)
+
+    def format_position(self, pos: APRSPosition) -> Dict[str, str]:
+        """Format position report for display.
+
+        Args:
+            pos: Position report
+
+        Returns:
+            Dictionary of formatted position fields
+        """
+        return {
+            "station": pos.station,
+            "time": pos.timestamp.strftime("%H:%M:%S"),
+            "latitude": f"{pos.latitude:.4f}",
+            "longitude": f"{pos.longitude:.4f}",
+            "grid": pos.grid_square,
+            "symbol": f"{pos.symbol_table}{pos.symbol_code}",
+            "comment": (
+                pos.comment[:30] if len(pos.comment) > 30 else pos.comment
+            ),  # Truncate long comments
+        }
+
+    @staticmethod
+    def clean_position_comment(comment: str) -> str:
+        """Clean position comment by removing redundant data fields.
+
+        Strips weather data, altitude, course/speed, and other APRS data
+        that's already parsed into dedicated fields.
+
+        Args:
+            comment: Raw comment from position report
+
+        Returns:
+            Cleaned comment (empty string if nothing meaningful remains)
+        """
+        if not comment:
+            return ""
+
+        # Strip common APRS data patterns:
+        # - Weather: cdddsddd, tddd, hddd, rddd, pddd, Pddd, bddddd, gddd
+        comment = re.sub(r"[ctrhpPbg]\d{2,5}", "", comment)
+        # - Wind: _ddd/ddd
+        comment = re.sub(r"_\d{3}/\d{3}", "", comment)
+        # - Altitude: /A=xxxxxx
+        comment = re.sub(r"/A=\d{6}", "", comment)
+        # - Course/speed: ccc/sss
+        comment = re.sub(r"\d{3}/\d{3}", "", comment)
+        # - PHG (Power-Height-Gain): PHGxxxx
+        comment = re.sub(r"PHG\d{4}", "", comment)
+        # - RNG (Range): RNGxxxx
+        comment = re.sub(r"RNG\d{4}", "", comment)
+        # - DFS (Direction Finding): DFSxxxx
+        comment = re.sub(r"DFS\d{4}", "", comment)
+
+        # Strip leading/trailing whitespace
+        comment = comment.strip()
+
+        return comment
+
+    def format_combined_notification(
+        self, pos: APRSPosition, wx: APRSWeather, relay_call: str = None
+    ) -> str:
+        """Format combined position+weather notification for display.
+
+        Args:
+            pos: Position report
+            wx: Weather report (from same packet)
+            relay_call: Optional relay station (for third-party packets)
+
+        Returns:
+            Formatted string for single-line display
+        """
+        # Start with station (with relay path if third-party) and grid
+        if relay_call:
+            station_part = f"{pos.station} [📡 via {relay_call}]"
+        else:
+            station_part = pos.station
+        parts = [f"{station_part}: {pos.grid_square}"]
+
+        # Add weather summary (only non-None fields)
+        weather_parts = []
+        if wx.temperature is not None:
+            weather_parts.append(f"{wx.temperature}°F")
+        if wx.wind_speed is not None:
+            wind_str = f"{wx.wind_speed}mph"
+            if wx.wind_direction is not None:
+                # Convert to compass direction
+                directions = [
+                    "N",
+                    "NNE",
+                    "NE",
+                    "ENE",
+                    "E",
+                    "ESE",
+                    "SE",
+                    "SSE",
+                    "S",
+                    "SSW",
+                    "SW",
+                    "WSW",
+                    "W",
+                    "WNW",
+                    "NW",
+                    "NNW",
+                ]
+                index = round(wx.wind_direction / 22.5) % 16
+                wind_str = f"{directions[index]} {wind_str}"
+            weather_parts.append(wind_str)
+        if wx.humidity is not None:
+            weather_parts.append(f"{wx.humidity}%H")
+        if wx.pressure is not None:
+            weather_parts.append(f"{wx.pressure}mb")
+
+        if weather_parts:
+            parts.append(", ".join(weather_parts))
+
+        # Add cleaned comment if present and meaningful
+        cleaned_comment = self.clean_position_comment(pos.comment)
+        if cleaned_comment:
+            parts.append(cleaned_comment)
+
+        return " | ".join(parts)
+
+    def get_all_stations(self, sort_by: str = "last") -> List[APRSStation]:
+        """Get all tracked stations.
+
+        Args:
+            sort_by: Sort order - 'name', 'packets', 'last', or 'hops' (default: 'last')
+
+        Returns:
+            List of all stations sorted by specified order
+        """
+        if sort_by == "name":
+            # Sort alphabetically by callsign
+            return sorted(self.stations.values(), key=lambda x: x.callsign)
+        elif sort_by == "packets":
+            # Sort by packet count (highest first)
+            return sorted(
+                self.stations.values(),
+                key=lambda x: x.packets_heard,
+                reverse=True,
+            )
+        elif sort_by == "hops":
+            # Sort by hop count (direct RF / 0 hops first)
+            return sorted(self.stations.values(), key=lambda x: x.hop_count)
+        else:  # 'last' or default
+            # Sort by last heard timestamp (most recent first)
+            return sorted(
+                self.stations.values(),
+                key=lambda x: x.last_heard,
+                reverse=True,
+            )
+
+    def get_station(self, callsign: str) -> Optional[APRSStation]:
+        """Get station information.
+
+        Args:
+            callsign: Station callsign
+
+        Returns:
+            APRSStation if found, None otherwise
+        """
+        return self.stations.get(callsign.upper())
+
+    def get_digipeater_coverage(self) -> Dict[str, Dict]:
+        """Get digipeater coverage data for mapping.
+
+        Returns a dictionary of digipeaters and the stations they heard DIRECTLY
+        over RF (first hop only). Excludes stations heard via:
+        - Internet/iGate (heard_direct = False)
+        - Other digipeaters (second+ hop)
+
+        This shows each digipeater's actual direct RF coverage footprint.
+
+        Returns:
+            Dictionary mapping digipeater callsigns to coverage data:
+            {
+                "DIGI-CALL": {
+                    "callsign": "DIGI-CALL",
+                    "position": {...} or None,
+                    "stations_heard": [
+                        {
+                            "callsign": "STATION-CALL",
+                            "position": {...},
+                            "last_heard": "ISO timestamp",
+                            "packets": 10
+                        },
+                        ...
+                    ],
+                    "station_count": 5,
+                    "has_position": True/False
+                },
+                ...
+            }
+        """
+        coverage = {}
+
+        # Iterate through all stations to find which digipeaters heard them
+        # Only include stations heard directly over RF (not via iGate/internet)
+        for station in self.stations.values():
+            if not station.digipeaters_heard_by:
+                continue
+
+            # Skip stations not heard directly over RF
+            if not station.heard_direct:
+                continue
+
+            for digi_call in station.digipeaters_heard_by:
+                digi_upper = digi_call.upper()
+
+                # Initialize digipeater entry if not exists
+                if digi_upper not in coverage:
+                    digi_station = self.stations.get(digi_upper)
+                    coverage[digi_upper] = {
+                        "callsign": digi_upper,
+                        "position": None,
+                        "stations_heard": [],
+                        "station_count": 0,
+                        "has_position": False
+                    }
+
+                    # Add digipeater's own position if available
+                    if digi_station and digi_station.last_position:
+                        pos = digi_station.last_position
+                        coverage[digi_upper]["position"] = {
+                            "latitude": pos.latitude,
+                            "longitude": pos.longitude,
+                            "grid_square": pos.grid_square
+                        }
+                        coverage[digi_upper]["has_position"] = True
+
+                # Add this station to the digipeater's heard list
+                station_data = {
+                    "callsign": station.callsign,
+                    "last_heard": station.last_heard.isoformat(),
+                    "packets": station.packets_heard
+                }
+
+                # Add station position if available
+                if station.last_position:
+                    station_data["position"] = {
+                        "latitude": station.last_position.latitude,
+                        "longitude": station.last_position.longitude,
+                        "grid_square": station.last_position.grid_square
+                    }
+
+                coverage[digi_upper]["stations_heard"].append(station_data)
+                coverage[digi_upper]["station_count"] = len(coverage[digi_upper]["stations_heard"])
+
+        return coverage
+
+    def format_station_table_row(self, station: APRSStation) -> Dict[str, str]:
+        """Format station for table display.
+
+        Args:
+            station: Station to format
+
+        Returns:
+            Dictionary of formatted fields
+        """
+        # Get grid square from position
+        grid = (
+            station.last_position.grid_square
+            if station.last_position
+            else "---"
+        )
+
+        # Get temperature from weather
+        temp = (
+            f"{station.last_weather.temperature}°F"
+            if (
+                station.last_weather
+                and station.last_weather.temperature is not None
+            )
+            else "---"
+        )
+
+        # Format last heard time
+        last_heard = station.last_heard.strftime("%H:%M:%S")
+
+        return {
+            "callsign": station.callsign,
+            "grid": grid,
+            "temp": temp,
+            "last_heard": last_heard,
+            "packets": str(station.packets_heard),
+            "hops": station.hop_count,
+        }
+
+    def format_station_detail(self, station: APRSStation) -> str:
+        """Format detailed station information.
+
+        Args:
+            station: Station to format
+
+        Returns:
+            Formatted multi-line string with all station details
+        """
+        lines = []
+        lines.append(f"Station: {station.callsign}")
+        if station.device:
+            lines.append(f"Device: {station.device}")
+        lines.append(
+            f"First Heard: {station.first_heard.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        lines.append(
+            f"Last Heard: {station.last_heard.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        lines.append(f"Packets Heard: {station.packets_heard}")
+        lines.append("")
+
+        # Position info
+        if station.last_position:
+            pos = station.last_position
+            lines.append("Position:")
+            lines.append(f"  Grid Square: {pos.grid_square}")
+            lines.append(f"  Latitude: {pos.latitude:.4f}°")
+            lines.append(f"  Longitude: {pos.longitude:.4f}°")
+            if pos.altitude:
+                lines.append(f"  Altitude: {pos.altitude} ft")
+            lines.append(f"  Symbol: {pos.symbol_table}{pos.symbol_code}")
+            if pos.comment:
+                cleaned = self.clean_position_comment(pos.comment)
+                if cleaned:
+                    lines.append(f"  Comment: {cleaned}")
+            lines.append(
+                f"  Updated: {pos.timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            lines.append("")
+        else:
+            lines.append("Position: Not available")
+            lines.append("")
+
+        # Weather info
+        if station.last_weather:
+            wx = station.last_weather
+            lines.append("Weather:")
+            if wx.temperature is not None:
+                lines.append(f"  Temperature: {wx.temperature}°F")
+            if wx.humidity is not None:
+                lines.append(f"  Humidity: {wx.humidity}%")
+            if wx.pressure is not None:
+                lines.append(f"  Pressure: {wx.pressure} mb")
+            if wx.wind_speed is not None:
+                wind_str = f"{wx.wind_speed} mph"
+                if wx.wind_direction is not None:
+                    directions = [
+                        "N",
+                        "NNE",
+                        "NE",
+                        "ENE",
+                        "E",
+                        "ESE",
+                        "SE",
+                        "SSE",
+                        "S",
+                        "SSW",
+                        "SW",
+                        "WSW",
+                        "W",
+                        "WNW",
+                        "NW",
+                        "NNW",
+                    ]
+                    index = round(wx.wind_direction / 22.5) % 16
+                    wind_str = f"{directions[index]} {wind_str}"
+                lines.append(f"  Wind: {wind_str}")
+            if wx.wind_gust is not None and wx.wind_gust > 0:
+                lines.append(f"  Wind Gust: {wx.wind_gust} mph")
+            if wx.rain_1h is not None:
+                lines.append(f'  Rain (1h): {wx.rain_1h}"')
+            if wx.rain_24h is not None:
+                lines.append(f'  Rain (24h): {wx.rain_24h}"')
+            if wx.rain_since_midnight is not None:
+                lines.append(f'  Rain (midnight): {wx.rain_since_midnight}"')
+            lines.append(
+                f"  Updated: {wx.timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+
+            # Show weather history sample count
+            if station.weather_history:
+                history_count = len(station.weather_history)
+                lines.append(
+                    f"  History: {history_count} sample{'s' if history_count != 1 else ''} stored"
+                )
+
+            # Add temperature history chart if available
+            if station.weather_history and any(
+                wx.temperature is not None
+                for wx in station.weather_history
+            ):
+                lines.append("")
+                lines.append(self._format_temperature_chart(station.weather_history))
+
+            # Add wind rose if wind data available
+            if station.weather_history and any(
+                wx.wind_direction is not None and wx.wind_speed is not None
+                for wx in station.weather_history
+            ):
+                lines.append("")
+                lines.append(self._format_wind_rose(station.weather_history))
+
+            # Add Zambretti weather forecast if pressure available
+            forecast = self.get_zambretti_forecast(station.callsign)
+            if forecast:
+                lines.append("")
+                lines.append("Forecast (Zambretti):")
+                lines.append(f"  {forecast['forecast']} (Code {forecast['code']})")
+
+                # Format trend with arrow
+                trend_arrow = '↑' if forecast['trend'] == 'rising' else '↓' if forecast['trend'] == 'falling' else '→'
+                lines.append(f"  Pressure trend: {trend_arrow} {forecast['trend']}")
+                lines.append(f"  Confidence: {forecast['confidence']}")
+
+            lines.append("")
+        else:
+            lines.append("Weather: Not available")
+            lines.append("")
+
+        # Status info
+        if station.last_status:
+            status = station.last_status
+            lines.append("Status:")
+            lines.append(f"  {status.status_text}")
+            lines.append(
+                f"  Updated: {status.timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            lines.append("")
+        else:
+            lines.append("Status: Not available")
+            lines.append("")
+
+        # Telemetry info
+        if station.last_telemetry:
+            telem = station.last_telemetry
+            lines.append("Telemetry:")
+            lines.append(f"  Sequence: {telem.sequence}")
+            lines.append(
+                f"  Analog Channels: {', '.join(str(v) for v in telem.analog)}"
+            )
+            lines.append(f"  Digital Bits: {telem.digital}")
+            lines.append(
+                f"  Updated: {telem.timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
+            if len(station.telemetry_sequence) > 1:
+                lines.append(
+                    f"  History: {len(station.telemetry_sequence)} packets stored"
+                )
+            lines.append("")
+        else:
+            lines.append("Telemetry: Not available")
+            lines.append("")
+
+        # Message statistics
+        lines.append("Messages:")
+        lines.append(f"  Sent by station: {station.messages_sent}")
+        lines.append(f"  Received (to us): {station.messages_received}")
+        lines.append("")
+
+        # Reception path information
+        lines.append("Reception:")
+        lines.append(
+            f"  Heard direct on RF: {'Yes' if station.heard_direct else 'No'}"
+        )
+        hop_str = (
+            "Direct RF"
+            if station.hop_count == 0
+            else (
+                f"{station.hop_count} hop{'s' if station.hop_count != 1 else ''}"
+                if station.hop_count < 999
+                else "Unknown"
+            )
+        )
+        lines.append(f"  Minimum hops: {hop_str}")
+        if station.relay_paths:
+            lines.append(f"  Relayed via: {', '.join(station.relay_paths)}")
+
+        return "\n".join(lines)
+
+    def _format_temperature_chart(
+        self, weather_history: List[APRSWeather], width: int = 60
+    ) -> str:
+        """Create a text-based temperature chart from weather history.
+
+        Args:
+            weather_history: List of weather reports (should be sorted newest first)
+            width: Width of the chart in characters
+
+        Returns:
+            Multi-line ASCII chart showing temperature over time
+        """
+        if not weather_history:
+            return "  No temperature data available"
+
+        # Filter to only reports with temperature data
+        temps = [
+            (wx.timestamp, wx.temperature)
+            for wx in weather_history
+            if wx.temperature is not None
+        ]
+
+        if not temps:
+            return "  No temperature data available"
+
+        # Sort oldest to newest for chart (left to right = past to present)
+        temps.sort(key=lambda x: x[0])
+
+        # Extract values
+        timestamps = [t[0] for t in temps]
+        values = [t[1] for t in temps]
+
+        min_temp = min(values)
+        max_temp = max(values)
+        temp_range = max_temp - min_temp if max_temp != min_temp else 1
+
+        # Chart dimensions
+        height = 8
+        chart_width = min(width, len(values) * 2)
+
+        # Build chart
+        lines = []
+        lines.append(
+            f"  Temperature: {min_temp:.0f}°F - {max_temp:.0f}°F "
+            f"({len(temps)} samples)"
+        )
+        lines.append("  " + "─" * chart_width)
+
+        # Create chart rows (top to bottom = hot to cold)
+        for row in range(height):
+            threshold = max_temp - (temp_range * row / (height - 1))
+            line = "  "
+            for i, temp in enumerate(values):
+                if i >= chart_width // 2:
+                    break
+                # Use different characters for above/at/below threshold
+                if temp >= threshold - (temp_range / (height * 2)):
+                    if temp == values[-1] and i == len(values) - 1:
+                        line += "█ "  # Current value
+                    else:
+                        line += "▓ "  # Historical value above threshold
+                else:
+                    line += "  "  # Below threshold
+
+            # Add temperature label on right
+            if row == 0:
+                line += f" {max_temp:.0f}°F"
+            elif row == height - 1:
+                line += f" {min_temp:.0f}°F"
+            elif row == height // 2:
+                mid_temp = (max_temp + min_temp) / 2
+                line += f" {mid_temp:.0f}°F"
+
+            lines.append(line)
+
+        lines.append("  " + "─" * chart_width)
+
+        # Time labels (oldest ... newest)
+        oldest = timestamps[0].strftime("%H:%M")
+        newest = timestamps[-1].strftime("%H:%M")
+        time_label = f"  {oldest}" + " " * (chart_width - len(oldest) - len(newest)) + newest
+        lines.append(time_label)
+
+        return "\n".join(lines)
+
+    def _format_wind_rose(
+        self, weather_history: List[APRSWeather]
+    ) -> str:
+        """Create a text-based wind rose from weather history.
+
+        Args:
+            weather_history: List of weather reports
+
+        Returns:
+            ASCII art wind rose showing wind direction distribution
+        """
+        if not weather_history:
+            return "  No wind data available"
+
+        # Filter to reports with wind data
+        winds = [
+            (wx.wind_direction, wx.wind_speed)
+            for wx in weather_history
+            if wx.wind_direction is not None and wx.wind_speed is not None
+        ]
+
+        if not winds:
+            return "  No wind data available"
+
+        # Count wind directions in 8 sectors (N, NE, E, SE, S, SW, W, NW)
+        sectors = {
+            "N": 0,
+            "NE": 0,
+            "E": 0,
+            "SE": 0,
+            "S": 0,
+            "SW": 0,
+            "W": 0,
+            "NW": 0,
+        }
+        sector_speeds = {k: [] for k in sectors.keys()}
+
+        # Map directions to sectors
+        for direction, speed in winds:
+            # Convert to 8 sectors (0° = N, 45° = NE, etc.)
+            sector_index = int((direction + 22.5) / 45) % 8
+            sector_names = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+            sector = sector_names[sector_index]
+            sectors[sector] += 1
+            sector_speeds[sector].append(speed)
+
+        # Calculate average speed per sector
+        avg_speeds = {}
+        for sector, speeds in sector_speeds.items():
+            avg_speeds[sector] = sum(speeds) / len(speeds) if speeds else 0
+
+        # Find max count for scaling
+        max_count = max(sectors.values()) if sectors.values() else 1
+        scale = 5  # Max bar length
+
+        # Build wind rose
+        lines = []
+        lines.append(
+            f"  Wind Rose ({len(winds)} samples, avg {sum(s for _, s in winds) / len(winds):.1f} mph)"
+        )
+        lines.append("  " + "─" * 30)
+
+        # Create rose pattern
+        #        N
+        #     NW   NE
+        #   W         E
+        #     SW   SE
+        #        S
+
+        n_bar = "█" * int(sectors["N"] / max_count * scale)
+        ne_bar = "█" * int(sectors["NE"] / max_count * scale)
+        e_bar = "█" * int(sectors["E"] / max_count * scale)
+        se_bar = "█" * int(sectors["SE"] / max_count * scale)
+        s_bar = "█" * int(sectors["S"] / max_count * scale)
+        sw_bar = "█" * int(sectors["SW"] / max_count * scale)
+        w_bar = "█" * int(sectors["W"] / max_count * scale)
+        nw_bar = "█" * int(sectors["NW"] / max_count * scale)
+
+        # Format as rose
+        lines.append(f"       N {n_bar:>5}  ({sectors['N']:2d}, {avg_speeds['N']:.0f}mph)")
+        lines.append(
+            f"  NW {nw_bar:>5}     {ne_bar:<5} NE  "
+            f"({sectors['NW']},{sectors['NE']})"
+        )
+        lines.append(f"       |       |")
+        lines.append(
+            f"  W {w_bar:>5}  •  {e_bar:<5} E  "
+            f"({sectors['W']},{sectors['E']})"
+        )
+        lines.append(f"       |       |")
+        lines.append(
+            f"  SW {sw_bar:>5}     {se_bar:<5} SE  "
+            f"({sectors['SW']},{sectors['SE']})"
+        )
+        lines.append(f"       S {s_bar:>5}  ({sectors['S']:2d}, {avg_speeds['S']:.0f}mph)")
+
+        lines.append("  " + "─" * 30)
+
+        return "\n".join(lines)
+
+    def clear_database(self):
+        """Clear all APRS database entries (stations, messages, positions, weather).
+
+        Returns:
+            Tuple of (stations_cleared, messages_cleared)
+        """
+        station_count = len(self.stations)
+        message_count = len(self.monitored_messages)
+
+        self.stations.clear()
+        self.messages.clear()
+        self.monitored_messages.clear()
+        self.weather_reports.clear()
+        self.position_reports.clear()
+
+        return (station_count, message_count)
+
+    def prune_database(self, days: int):
+        """Prune database entries older than specified days.
+
+        Args:
+            days: Number of days - entries last heard more than this many days ago will be removed
+
+        Returns:
+            Tuple of (stations_pruned, messages_pruned)
+        """
+        cutoff_time = datetime.now() - timedelta(days=days)
+
+        # Prune stations
+        stations_to_remove = []
+        for callsign, station in self.stations.items():
+            if station.last_heard < cutoff_time:
+                stations_to_remove.append(callsign)
+
+        for callsign in stations_to_remove:
+            del self.stations[callsign]
+            # Also remove from position and weather reports
+            if callsign in self.position_reports:
+                del self.position_reports[callsign]
+            if callsign in self.weather_reports:
+                del self.weather_reports[callsign]
+
+        # Prune messages
+        messages_before = len(self.monitored_messages)
+        self.monitored_messages = [
+            msg
+            for msg in self.monitored_messages
+            if msg.timestamp >= cutoff_time
+        ]
+        self.messages = [
+            msg for msg in self.messages if msg.timestamp >= cutoff_time
+        ]
+        messages_pruned = messages_before - len(self.monitored_messages)
+
+        return (len(stations_to_remove), messages_pruned)

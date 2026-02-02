@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FSY Packet Console</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>FSY Packet Console</h1>
+        </div>
+        <div class="header-right">
+            <nav class="header-nav">
+                <a href="/" class="nav-link active">Map</a>
+                <a href="/stations" class="nav-link">Stations</a>
+                <a href="/weather-map" class="nav-link">Weather</a>
+            </nav>
+            <div id="status">
+                <span id="mycall" class="status-item">Loading...</span>
+                <span class="status-separator">•</span>
+                <span id="station-count" class="status-item">0 Stations</span>
+                <span class="status-separator">•</span>
+                <span id="message-count" class="status-item status-clickable" title="Click to view all monitored APRS messages">0 Messages</span>
+                <span class="status-separator">•</span>
+                <span id="connection-status" class="status-item status-connected">Connected</span>
+            </div>
+        </div>
+    </header>
+
+    <div class="container">
+        <div id="map-container">
+            <div id="map"></div>
+            <div id="map-controls">
+                <button id="fit-bounds-btn" title="Fit all stations">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/>
+                    </svg>
+                </button>
+            </div>
+
+            <!-- Filter Controls Panel -->
+            <div id="filter-panel">
+                <div class="filter-header">
+                    <h3>Map Filters</h3>
+                    <button id="toggle-filters-btn" class="collapse-btn">−</button>
+                </div>
+                <div id="filter-content">
+                    <div class="filter-section">
+                        <label class="filter-label">
+                            <input type="checkbox" id="use-aprs-icons">
+                            <span>APRS Icons</span>
+                        </label>
+                    </div>
+
+                    <div class="filter-section">
+                        <label class="filter-label">
+                            <input type="checkbox" id="show-digipeater-coverage">
+                            <span>Digipeater Coverage</span>
+                        </label>
+                    </div>
+
+                    <div class="filter-section">
+                        <label class="filter-label">
+                            <span>Time Range:</span>
+                            <select id="time-filter" class="filter-select">
+                                <option value="all" selected>All Time</option>
+                                <option value="1h">Last Hour</option>
+                                <option value="4h">Last 4 Hours</option>
+                                <option value="24h">Last 24 Hours</option>
+                            </select>
+                        </label>
+                    </div>
+
+                    <div class="filter-section">
+                        <label class="filter-label">
+                            <input type="checkbox" id="direct-only-filter">
+                            <span>Heard Direct (RF)</span>
+                        </label>
+                    </div>
+
+                    <div class="filter-section">
+                        <label class="filter-label">
+                            <input type="checkbox" id="with-path-filter">
+                            <span>With Path</span>
+                        </label>
+                    </div>
+
+                    <div class="filter-section">
+                        <label class="filter-label">
+                            <input type="checkbox" id="show-local-coverage">
+                            <span>My Coverage (Direct)</span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="sidebar">
+            <section id="station-list" class="sidebar-section">
+                <div class="section-header">
+                    <h2>Stations</h2>
+                    <select id="sort-by" class="sort-select">
+                        <option value="last">Last Heard</option>
+                        <option value="name">Callsign</option>
+                        <option value="packets">Packet Count</option>
+                        <option value="hops">Hop Count</option>
+                    </select>
+                </div>
+                <div id="stations" class="list-container"></div>
+            </section>
+
+            <section id="weather-list" class="sidebar-section">
+                <div class="section-header">
+                    <h2>Weather Stations</h2>
+                </div>
+                <div id="weather-stations" class="list-container"></div>
+            </section>
+
+            <section id="messages" class="sidebar-section">
+                <div class="section-header">
+                    <h2>Recent Messages</h2>
+                </div>
+                <div id="message-list" class="list-container"></div>
+            </section>
+
+            <section id="activity-feed" class="sidebar-section">
+                <div class="section-header">
+                    <h2>Live Activity</h2>
+                    <button id="clear-activity-btn" class="small-btn" title="Clear activity feed">Clear</button>
+                </div>
+                <div id="activity-list" class="list-container activity-container"></div>
+            </section>
+        </div>
+    </div>
+
+    <!-- Monitored Messages Modal -->
+    <div id="monitored-messages-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>APRS Message Monitor</h2>
+                <button id="close-modal-btn" class="close-btn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="monitored-messages-list" class="monitored-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/vendor/leaflet/leaflet.js"></script>
+    <script src="/static/vendor/chart.js/chart.min.js"></script>
+    <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>

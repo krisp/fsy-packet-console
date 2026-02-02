@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Weather Map - FSY Packet Console</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>FSY Packet Console</h1>
+        </div>
+        <div class="header-right">
+            <nav class="header-nav">
+                <a href="/" class="nav-link">Map</a>
+                <a href="/stations" class="nav-link">Stations</a>
+                <a href="/weather-map" class="nav-link active">Weather</a>
+            </nav>
+            <div id="status">
+                <span id="mycall" class="status-item">Loading...</span>
+                <span class="status-separator">•</span>
+                <span id="station-count" class="status-item">0 Stations</span>
+                <span class="status-separator">•</span>
+                <span id="connection-status" class="status-item status-connected">Connected</span>
+            </div>
+        </div>
+    </header>
+
+    <div class="weather-map-container">
+        <div id="weather-map"></div>
+
+        <div id="weather-controls">
+            <h3>Display Options</h3>
+
+            <!-- Unit System Toggle -->
+            <div class="control-section">
+                <label>
+                    <input type="checkbox" id="use-metric">
+                    Use Metric (°C)
+                </label>
+            </div>
+
+            <hr>
+
+            <!-- Element Visibility -->
+            <div class="control-section">
+                <label><input type="checkbox" id="show-labels" checked> Show Callsigns</label>
+                <label><input type="checkbox" id="show-temp" checked> Temperature</label>
+                <label><input type="checkbox" id="show-dewpoint" checked> Dew Point</label>
+                <label><input type="checkbox" id="show-wind" checked> Wind Barbs</label>
+                <label><input type="checkbox" id="show-pressure" checked> Pressure</label>
+            </div>
+        </div>
+    </div>
+
+    <!-- Legend -->
+    <div id="weather-legend">
+        <h3>Station Model</h3>
+        <div class="legend-content">
+            <div class="legend-item">
+                <span class="legend-label">Temperature:</span>
+                <span class="legend-value">Upper-left (<span id="legend-temp-unit">°F</span>)</span>
+            </div>
+            <div class="legend-item">
+                <span class="legend-label">Dew Point:</span>
+                <span class="legend-value">Lower-left (<span id="legend-dewpoint-unit">°F</span>)</span>
+            </div>
+            <div class="legend-item">
+                <span class="legend-label">Wind:</span>
+                <span class="legend-value">Barbs in knots (50kt=pennant, 10kt=full, 5kt=half)</span>
+            </div>
+            <div class="legend-item">
+                <span class="legend-label">Pressure:</span>
+                <span class="legend-value">Upper-right (last 3 digits mbar + ⬀/⬂ trend)</span>
+            </div>
+            <div class="legend-item">
+                <span class="legend-label">Callsign:</span>
+                <span class="legend-value">Below station</span>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/vendor/leaflet/leaflet.js"></script>
+    <script type="module" src="/static/js/weather-map.js"></script>
+</body>
+</html>

@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stations - FSY Packet Console</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>FSY Packet Console</h1>
+        </div>
+        <div class="header-right">
+            <nav class="header-nav">
+                <a href="/" class="nav-link">Map</a>
+                <a href="/stations" class="nav-link active">Stations</a>
+                <a href="/weather-map" class="nav-link">Weather</a>
+            </nav>
+            <div id="status">
+                <span id="mycall" class="status-item">Loading...</span>
+                <span class="status-separator">•</span>
+                <span id="station-count" class="status-item">0 Stations</span>
+                <span class="status-separator">•</span>
+                <span id="message-count" class="status-item status-clickable" title="Click to view all monitored APRS messages">0 Messages</span>
+                <span class="status-separator">•</span>
+                <span id="connection-status" class="status-item status-connected">Connected</span>
+            </div>
+        </div>
+    </header>
+
+    <div class="container table-container">
+        <div class="table-header">
+            <h2>Station List</h2>
+            <div class="table-controls">
+                <input type="text" id="search-input" placeholder="Search callsigns..." class="search-input">
+                <button id="refresh-btn" class="small-btn">Refresh</button>
+            </div>
+        </div>
+
+        <div class="table-wrapper">
+            <table id="stations-table" class="data-table">
+                <thead>
+                    <tr>
+                        <th data-sort="callsign" class="sortable sorted-asc">
+                            Callsign
+                            <span class="sort-indicator">▲</span>
+                        </th>
+                        <th data-sort="grid" class="sortable">
+                            Grid
+                            <span class="sort-indicator"></span>
+                        </th>
+                        <th data-sort="device" class="sortable">
+                            Device
+                            <span class="sort-indicator"></span>
+                        </th>
+                        <th data-sort="last_heard" class="sortable">
+                            Last Heard
+                            <span class="sort-indicator"></span>
+                        </th>
+                        <th data-sort="packets" class="sortable">
+                            Packets
+                            <span class="sort-indicator"></span>
+                        </th>
+                        <th data-sort="hops" class="sortable">
+                            Hops
+                            <span class="sort-indicator"></span>
+                        </th>
+                        <th data-sort="direct" class="sortable">
+                            Direct
+                            <span class="sort-indicator"></span>
+                        </th>
+                        <th data-sort="messages" class="sortable">
+                            Messages
+                            <span class="sort-indicator"></span>
+                        </th>
+                        <th data-sort="comment" class="sortable">
+                            Comment
+                            <span class="sort-indicator"></span>
+                        </th>
+                        <th data-sort="path" class="sortable">
+                            Path
+                            <span class="sort-indicator"></span>
+                        </th>
+                    </tr>
+                </thead>
+                <tbody id="stations-tbody">
+                    <tr class="loading-row">
+                        <td colspan="10" class="loading-cell">Loading stations...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="table-footer">
+            <span id="table-info" class="table-info">Loading...</span>
+        </div>
+    </div>
+
+    <script type="module" src="/static/js/stations-table.js"></script>
+</body>
+</html>

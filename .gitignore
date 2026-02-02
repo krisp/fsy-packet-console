@@ -1,0 +1,28 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# NFS/FUSE temporary files
+.nfs*
+.fuse_hidden*
+
+# Legacy config (migrated to ~/.tnc_config.json)
+tnc_config.json

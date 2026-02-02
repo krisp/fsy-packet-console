@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Station Detail - FSY Packet Console</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <a href="/" class="back-link">&laquo; Back to Map</a>
+            <h1>Station: <span id="callsign">...</span></h1>
+        </div>
+        <div class="header-right">
+            <nav class="header-nav">
+                <a href="/" class="nav-link">Map</a>
+                <a href="/stations" class="nav-link">Stations</a>
+                <a href="/weather-map" class="nav-link">Weather</a>
+            </nav>
+            <div id="status">
+                <span id="last-heard" class="status-item">Loading...</span>
+            </div>
+        </div>
+    </header>
+
+    <div class="container detail-container detail-layout">
+        <!-- Left Column: Map + Messages -->
+        <div class="detail-left">
+            <section class="detail-section">
+                <h2>Location Map</h2>
+                <div id="station-map" class="detail-map-large"></div>
+            </section>
+
+            <section id="messages-section" class="detail-section">
+                <h2>Messages</h2>
+                <div id="station-messages" class="list-container">
+                    <p class="empty-message">No messages with this station</p>
+                </div>
+            </section>
+        </div>
+
+        <!-- Right Column: Info Panels -->
+        <div class="detail-right">
+            <section id="position-info" class="detail-section">
+                <h2>Position Information</h2>
+                <div id="position-data" class="data-grid">
+                    <div class="data-item">
+                        <span class="data-label">Grid Square:</span>
+                        <span id="grid-square" class="data-value">-</span>
+                    </div>
+                    <div class="data-item">
+                        <span class="data-label">Latitude:</span>
+                        <span id="latitude" class="data-value">-</span>
+                    </div>
+                    <div class="data-item">
+                        <span class="data-label">Longitude:</span>
+                        <span id="longitude" class="data-value">-</span>
+                    </div>
+                    <div class="data-item">
+                        <span class="data-label">Altitude:</span>
+                        <span id="altitude" class="data-value">-</span>
+                    </div>
+                    <div class="data-item full-width">
+                        <span class="data-label">Symbol:</span>
+                        <span id="symbol" class="data-value symbol-display">-</span>
+                    </div>
+                    <div class="data-item full-width">
+                        <span class="data-label">Comment:</span>
+                        <span id="comment" class="data-value">-</span>
+                    </div>
+                </div>
+            </section>
+
+            <section id="statistics" class="detail-section">
+                <h2>Statistics</h2>
+                <div class="data-grid">
+                    <div class="data-item">
+                        <span class="data-label">First Heard:</span>
+                        <span id="first-heard" class="data-value">-</span>
+                    </div>
+                    <div class="data-item">
+                        <span class="data-label">Last Heard:</span>
+                        <span id="last-heard-stat" class="data-value">-</span>
+                    </div>
+                    <div class="data-item" id="device-item" style="display: none;">
+                        <span class="data-label">Device:</span>
+                        <span id="device" class="data-value">-</span>
+                    </div>
+                    <div class="data-item">
+                        <span class="data-label">Packets Heard:</span>
+                        <span id="packets-heard" class="data-value">0</span>
+                    </div>
+                    <div class="data-item">
+                        <span class="data-label">Messages Received:</span>
+                        <span id="messages-received" class="data-value">0</span>
+                    </div>
+                    <div class="data-item">
+                        <span class="data-label">Messages Sent:</span>
+                        <span id="messages-sent" class="data-value">0</span>
+                    </div>
+                    <div class="data-item">
+                        <span class="data-label">Hop Count:</span>
+                        <span id="hop-count" class="data-value">-</span>
+                    </div>
+                    <div class="data-item">
+                        <span class="data-label">Heard Direct (RF):</span>
+                        <span id="heard-direct" class="data-value">-</span>
+                    </div>
+                    <div class="data-item">
+                        <span class="data-label">Heard Zero Hop:</span>
+                        <span id="heard-zero-hop" class="data-value">-</span>
+                    </div>
+                    <div class="data-item full-width">
+                        <span class="data-label">Digipeater Paths:</span>
+                        <span id="digipeater-paths" class="data-value">-</span>
+                    </div>
+                </div>
+            </section>
+
+            <section id="weather-history" class="detail-section" style="display:none">
+                <h2>Weather History</h2>
+                <div id="current-weather" class="data-grid weather-grid">
+                    <div class="data-item">
+                        <span class="data-label">Temperature:</span>
+                        <span id="wx-temp" class="data-value">-</span>
+                    </div>
+                    <div class="data-item">
+                        <span class="data-label">Humidity:</span>
+                        <span id="wx-humidity" class="data-value">-</span>
+                    </div>
+                    <div class="data-item">
+                        <span class="data-label">Pressure:</span>
+                        <span id="wx-pressure" class="data-value">-</span>
+                    </div>
+                    <div class="data-item">
+                        <span class="data-label">Wind:</span>
+                        <span id="wx-wind" class="data-value">-</span>
+                    </div>
+                </div>
+                <div id="zambretti-forecast" style="display:none; margin: 15px 0; padding: 12px; background: #f8f9fa; border-left: 4px solid #003399; border-radius: 4px;">
+                    <h3 style="margin: 0 0 8px 0; font-size: 14px; color: #003399;">Weather Forecast</h3>
+                    <div id="forecast-text" style="font-size: 14px; margin-bottom: 8px;"></div>
+                    <div id="forecast-details" style="font-size: 12px; color: #666;"></div>
+                </div>
+                <div class="chart-container">
+                    <canvas id="temp-chart"></canvas>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <script src="/static/vendor/leaflet/leaflet.js"></script>
+    <script src="/static/vendor/chart.js/chart.min.js"></script>
+    <script type="module">
+        import { loadStationDetail } from '/static/js/stations.js';
+
+        // Get callsign from URL path (decode URL encoding)
+        const pathParts = window.location.pathname.split('/');
+        const callsign = decodeURIComponent(pathParts[pathParts.length - 1]);
+
+        // Load station data
+        loadStationDetail(callsign);
+
+        // Add Escape key handler to go back to main console
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                window.location.href = '/';
+            }
+        });
+    </script>
+</body>
+</html>

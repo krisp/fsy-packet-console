@@ -1,0 +1,11 @@
+[tool.black]
+line-length = 79
+target-version = ['py37']
+
+[tool.pycodestyle]
+ignore = ['E203', 'W503', 'E501']
+max-line-length = 88
+
+[tool.flake8]
+ignore = ['E203', 'W503', 'E501']
+max-line-length = 88
