@@ -588,10 +588,11 @@ class WeatherMapApp {
             return '<div style="color: #999; font-size: 11px;">No temperature data</div>';
         }
 
-        // Filter history with valid temperatures and timestamps
+        // Filter and sort history with valid temperatures and timestamps
         const tempData = history
             .filter(h => h.temperature !== null && h.temperature !== undefined && h.timestamp)
-            .slice(-12); // Last 12 samples
+            .sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp)) // Sort oldest to newest
+            .slice(-12); // Last 12 samples (most recent)
 
         if (tempData.length === 0) {
             return '<div style="color: #999; font-size: 11px;">No temperature data</div>';
@@ -613,9 +614,15 @@ class WeatherMapApp {
             : h.temperature
         );
 
-        // Calculate temperature range with padding
-        const minTemp = Math.min(...temps);
-        const maxTemp = Math.max(...temps);
+        // Include current temperature in range calculation
+        const displayCurrentTemp = (currentTemp !== null && currentTemp !== undefined)
+            ? (useMetric ? this.renderer.fahrenheitToCelsius(currentTemp) : currentTemp)
+            : null;
+
+        // Calculate temperature range with padding (include current temp)
+        const allTemps = displayCurrentTemp !== null ? [...temps, displayCurrentTemp] : temps;
+        const minTemp = Math.min(...allTemps);
+        const maxTemp = Math.max(...allTemps);
         const tempPadding = (maxTemp - minTemp) * 0.1 || 1;
         const yMin = Math.floor(minTemp - tempPadding);
         const yMax = Math.ceil(maxTemp + tempPadding);
@@ -665,22 +672,29 @@ class WeatherMapApp {
             svg += `<circle cx="${x}" cy="${y}" r="3" fill="#0066cc" stroke="white" stroke-width="1"/>`;
         });
 
-        // Show current temperature indicator on the right side (if provided)
-        if (currentTemp !== null && currentTemp !== undefined) {
-            const displayTemp = useMetric
-                ? this.renderer.fahrenheitToCelsius(currentTemp)
-                : currentTemp;
-
-            // Position at right edge of plot area
+        // Show current temperature indicator (if provided)
+        if (displayCurrentTemp !== null) {
+            // Position current temp at the far right edge
             const currentX = marginLeft + plotWidth;
-            const currentY = marginTop + plotHeight - ((displayTemp - yMin) / yRange) * plotHeight;
+            const currentY = marginTop + plotHeight - ((displayCurrentTemp - yMin) / yRange) * plotHeight;
 
-            // Highlight circle
-            svg += `<circle cx="${currentX}" cy="${currentY}" r="4" fill="none" stroke="#ff6600" stroke-width="2"/>`;
-            svg += `<circle cx="${currentX}" cy="${currentY}" r="2" fill="#ff6600"/>`;
+            // Draw connecting dashed line from last history point to current
+            if (temps.length > 0) {
+                const lastIdx = temps.length - 1;
+                const lastX = marginLeft + (plotWidth * lastIdx / Math.max(1, temps.length - 1));
+                const lastY = marginTop + plotHeight - ((temps[lastIdx] - yMin) / yRange) * plotHeight;
 
-            // Label
-            svg += `<text x="${currentX}" y="${currentY - 10}" text-anchor="end" fill="#ff6600" font-weight="bold" font-size="10px">${Math.round(displayTemp)}°</text>`;
+                // Only draw if current temp is different from last history temp
+                if (Math.abs(displayCurrentTemp - temps[lastIdx]) > 0.5) {
+                    svg += `<line x1="${lastX}" y1="${lastY}" x2="${currentX}" y2="${currentY}" stroke="#ff6600" stroke-width="2" stroke-dasharray="4,3" opacity="0.7"/>`;
+                }
+            }
+
+            // Highlight circle (current temperature)
+            svg += `<circle cx="${currentX}" cy="${currentY}" r="5" fill="#ff6600" stroke="white" stroke-width="2"/>`;
+
+            // Label with current value
+            svg += `<text x="${currentX}" y="${currentY - 10}" text-anchor="end" fill="#ff6600" font-weight="bold" font-size="11px">${Math.round(displayCurrentTemp)}°</text>`;
         }
 
         // X-axis labels (time)
