@@ -1311,7 +1311,7 @@ class CommandCompleter(Completer):
             # Mode-specific filtering
             if self.command_processor.console_mode == "aprs":
                 # APRS mode: add APRS subcommands as top-level, hide radio commands
-                aprs_subcommands = ["message", "station", "wx"]
+                aprs_subcommands = ["message", "msg", "station", "wx", "weather"]
                 commands = sorted(set(commands + aprs_subcommands))
 
                 # Hide radio-specific commands (keep "radio" for mode switching if BLE)
@@ -1799,8 +1799,10 @@ class CommandCompleter(Completer):
             "exit": "Exit console",
             # APRS subcommands (when shown as top-level in APRS mode)
             "message": "APRS messaging",
+            "msg": "APRS messaging (alias for message)",
             "station": "Station database",
             "wx": "Weather stations",
+            "weather": "Weather stations (alias for wx)",
         }
         return help_text.get(cmd, "")
 
@@ -2013,7 +2015,7 @@ class CommandProcessor:
             # - Radio commands need "radio" prefix (if not in serial mode)
 
             # Check if it's an APRS subcommand without prefix
-            aprs_subcommands = ["message", "station", "wx"]
+            aprs_subcommands = ["message", "msg", "station", "wx", "weather"]
             if cmd in aprs_subcommands:
                 # Rewrite as "aprs <subcommand> ..."
                 cmd = "aprs"
