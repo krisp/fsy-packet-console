@@ -35,6 +35,56 @@ else
     echo "  (This may not work if dependencies aren't installed system-wide)"
 fi
 
+# Ask about TNC transport mode
+echo ""
+echo "TNC Transport Configuration"
+echo "==========================="
+echo "Select your TNC connection type:"
+echo "  1) BLE (Bluetooth Low Energy) - default"
+echo "  2) Serial KISS TNC (e.g., /dev/ttyUSB0)"
+echo "  3) KISS-over-TCP (e.g., Direwolf)"
+echo ""
+read -p "Select option [1-3, default: 1]: " TRANSPORT_CHOICE
+
+EXEC_ARGS="-l"  # Always enable logging
+
+case "${TRANSPORT_CHOICE}" in
+    2)
+        echo ""
+        read -p "Enter serial port (e.g., /dev/ttyUSB0): " SERIAL_PORT
+        if [[ -n "${SERIAL_PORT}" ]]; then
+            read -p "Enter baud rate [default: 9600]: " BAUD_RATE
+            BAUD_RATE=${BAUD_RATE:-9600}
+            EXEC_ARGS="${EXEC_ARGS} -s ${SERIAL_PORT} -b ${BAUD_RATE}"
+            echo "✓ Configured for Serial KISS: ${SERIAL_PORT} @ ${BAUD_RATE} baud"
+        else
+            echo "⚠ No serial port specified, falling back to BLE mode"
+        fi
+        ;;
+    3)
+        echo ""
+        read -p "Enter KISS TNC host (e.g., localhost or 192.168.1.100): " KISS_HOST
+        if [[ -n "${KISS_HOST}" ]]; then
+            read -p "Enter KISS TNC port [default: 8001]: " KISS_PORT
+            KISS_PORT=${KISS_PORT:-8001}
+            EXEC_ARGS="${EXEC_ARGS} -k ${KISS_HOST}:${KISS_PORT}"
+            echo "✓ Configured for KISS-over-TCP: ${KISS_HOST}:${KISS_PORT}"
+        else
+            echo "⚠ No KISS host specified, falling back to BLE mode"
+        fi
+        ;;
+    1|*)
+        echo ""
+        read -p "Enter Bluetooth MAC address (optional, can configure later): " BLE_MAC
+        if [[ -n "${BLE_MAC}" ]]; then
+            EXEC_ARGS="${EXEC_ARGS} -r ${BLE_MAC}"
+            echo "✓ Configured for BLE: ${BLE_MAC}"
+        else
+            echo "✓ Configured for BLE (MAC address will be read from config)"
+        fi
+        ;;
+esac
+
 # Confirm with user
 echo ""
 echo "Configuration:"
@@ -42,6 +92,7 @@ echo "  User:              ${CURRENT_USER}"
 echo "  Home Directory:    ${CURRENT_HOME}"
 echo "  Project Directory: ${PROJECT_DIR}"
 echo "  Python Executable: ${PYTHON_EXEC}"
+echo "  Command Arguments: ${EXEC_ARGS}"
 echo ""
 read -p "Install service with these settings? [y/N] " -n 1 -r
 echo
@@ -66,10 +117,11 @@ User=${CURRENT_USER}
 WorkingDirectory=${PROJECT_DIR}
 
 # Start the console in a screen session
-ExecStart=/usr/bin/screen -dmS ${SERVICE_NAME} ${PYTHON_EXEC} main.py
+ExecStart=/usr/bin/screen -dmS ${SERVICE_NAME} ${PYTHON_EXEC} main.py ${EXEC_ARGS}
 
-# Stop gracefully - send SIGTERM to allow cleanup
+# Stop gracefully - send SIGINT (Ctrl+C) for immediate clean shutdown
 ExecStop=/usr/bin/screen -S ${SERVICE_NAME} -X quit
+KillSignal=SIGINT
 
 # Allow up to 15 seconds for graceful shutdown (important for Bluetooth cleanup)
 TimeoutStopSec=15

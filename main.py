@@ -5,6 +5,33 @@ FSY Packet Console - Entry Point
 Professional packet radio and APRS platform with universal TNC support.
 """
 
+import os
+import sys
+
+
+class TeeLogger:
+    """Write to both a file and the original stream."""
+
+    def __init__(self, file_path, original_stream):
+        self.file = open(os.path.expanduser(file_path), 'a', buffering=1)
+        self.original = original_stream
+
+    def write(self, data):
+        self.original.write(data)
+        self.file.write(data)
+
+    def flush(self):
+        self.original.flush()
+        self.file.flush()
+
+    def close(self):
+        self.file.close()
+
+    def __getattr__(self, attr):
+        """Forward any other attributes to the original stream."""
+        return getattr(self.original, attr)
+
+
 if __name__ == "__main__":
     import argparse
     from src.console import run
@@ -54,6 +81,14 @@ if __name__ == "__main__":
         metavar="MAC",
         help="Bluetooth MAC address of radio (BLE mode only, e.g., 38:D2:00:01:62:C2)",
     )
+    parser.add_argument(
+        "-l",
+        "--log",
+        nargs="?",
+        const="~/.fsy-console",
+        metavar="FILE",
+        help="Log all console output to file (default: ~/.fsy-console)",
+    )
 
     args = parser.parse_args()
 
@@ -81,13 +116,25 @@ if __name__ == "__main__":
             tcp_host = args.kiss_tcp
             # Use default port 8001
 
-    run(
-        auto_tnc=args.tnc,
-        auto_connect=args.connect,
-        auto_debug=args.debug,
-        serial_port=args.serial,
-        serial_baud=args.baud,
-        tcp_host=tcp_host,
-        tcp_port=tcp_port,
-        radio_mac=args.radio_mac,
-    )
+    # Install logging to file if requested
+    log_file = None
+    if args.log:
+        log_file = TeeLogger(args.log, sys.stdout)
+        sys.stdout = log_file
+        sys.stderr = log_file
+
+    try:
+        run(
+            auto_tnc=args.tnc,
+            auto_connect=args.connect,
+            auto_debug=args.debug,
+            serial_port=args.serial,
+            serial_baud=args.baud,
+            tcp_host=tcp_host,
+            tcp_port=tcp_port,
+            radio_mac=args.radio_mac,
+        )
+    finally:
+        # Close log file if it was opened
+        if log_file:
+            log_file.close()
