@@ -10,6 +10,7 @@ import html
 import json
 import os
 import re
+import signal
 import socket
 import sys
 import time
@@ -6961,6 +6962,14 @@ def run(auto_tnc=False, auto_connect=None, auto_debug=False,
         serial_port=None, serial_baud=9600, tcp_host=None, tcp_port=8001,
         radio_mac=None):
     """Entry point for the console application."""
+    def sigterm_handler(signum, frame):
+        """Handle SIGTERM by raising SIGINT to interrupt the prompt."""
+        # Raise SIGINT to trigger KeyboardInterrupt in the blocking prompt
+        signal.raise_signal(signal.SIGINT)
+
+    # Register SIGTERM handler
+    signal.signal(signal.SIGTERM, sigterm_handler)
+
     try:
         asyncio.run(
             main(

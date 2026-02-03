@@ -119,10 +119,8 @@ WorkingDirectory=${PROJECT_DIR}
 # Start the console in a screen session
 ExecStart=/usr/bin/screen -dmS ${SERVICE_NAME} ${PYTHON_EXEC} main.py ${EXEC_ARGS}
 
-# Send SIGINT (Ctrl+C) for graceful shutdown
-KillSignal=SIGINT
-
-# Allow up to 30 seconds for graceful shutdown (important for Bluetooth cleanup)
+# Graceful shutdown: SIGTERM is caught and converted to SIGINT internally
+# This works even when screen is detached
 TimeoutStopSec=30
 
 # Restart on failure

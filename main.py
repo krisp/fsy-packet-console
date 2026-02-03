@@ -42,24 +42,22 @@ class TeeLogger:
         self.original.write(data)
 
         # Write to file with timestamps
-        if data:
-            lines = data.split('\n')
-            for i, line in enumerate(lines):
-                if i > 0:
-                    # We had a newline, so next line needs timestamp
-                    self.at_line_start = True
+        if not data:
+            return
 
-                # Add timestamp at start of line
-                if line:  # Don't timestamp empty lines
-                    if self.at_line_start:
-                        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                        self.file.write(f"[{timestamp}] ")
-                        self.at_line_start = False
-                    self.file.write(line)
+        for char in data:
+            # Add timestamp at the start of each line
+            if self.at_line_start and char != '\n':
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                self.file.write(f"[{timestamp}] ")
+                self.at_line_start = False
 
-                # Add newline back if this wasn't the last line
-                if i < len(lines) - 1:
-                    self.file.write('\n')
+            # Write the character
+            self.file.write(char)
+
+            # Track if we just wrote a newline
+            if char == '\n':
+                self.at_line_start = True
 
     def flush(self):
         self.original.flush()
