@@ -6,6 +6,12 @@ Decodes packet radio frames with Wireshark-style output
 
 import sys
 import re
+import argparse
+import gzip
+import json
+import base64
+import os
+from datetime import datetime
 
 
 class Colors:
@@ -364,16 +370,22 @@ def decode_kiss_frame(frame_hex):
     return result
 
 
-def format_frame_output(frame_num, timestamp, byte_count, decoded):
+def format_frame_output(frame_num, header_text, byte_count, decoded):
     """
     Format decoded frame in Wireshark-style output
+
+    Args:
+        frame_num: Frame number (for compatibility)
+        header_text: Custom header text (e.g., "Frame 42 [RX]: 12:34:56.789 (100 bytes)")
+        byte_count: Byte count string
+        decoded: Decoded frame data
     """
     lines = []
 
     # Header
     lines.append("")
     lines.append(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}")
-    lines.append(f"{Colors.BOLD}Frame {frame_num}: {timestamp} ({byte_count} bytes){Colors.RESET}")
+    lines.append(f"{Colors.BOLD}{header_text}{Colors.RESET}")
     lines.append(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}")
 
     # Check for errors
@@ -498,57 +510,238 @@ def parse_input_line(line):
     return None
 
 
-def main():
-    """Main function - reads input and analyzes frames"""
-    print(f"{Colors.BOLD}KISS/AX.25/APRS Protocol Analyzer{Colors.RESET}")
-    print(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}")
-    print()
-    print("Paste your frame capture below (one frame per line).")
-    print()
-    print("Supported formats:")
-    print("  [1] RX 11:49:44.979 (42b): c00092884040...")
-    print("  [DEBUG 12:31:24.651] TNC RX (54 bytes): c00092884040...")
-    print("  c00092884040...  (raw hex)")
-    print()
-    print("Press Ctrl+D (Linux/Mac) or Ctrl+Z then Enter (Windows) when done.")
-    print(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}")
-    print()
+def load_frame_buffer(buffer_file=None):
+    """
+    Load frames from the frame buffer database.
 
-    frames_analyzed = 0
-    acks_found = []
+    Args:
+        buffer_file: Path to buffer file (default: ~/.console_frame_buffer.json.gz)
+
+    Returns:
+        List of tuples (frame_num, timestamp, byte_count, frame_hex, direction)
+    """
+    if buffer_file is None:
+        buffer_file = os.path.expanduser("~/.console_frame_buffer.json.gz")
+
+    if not os.path.exists(buffer_file):
+        print(f"{Colors.RED}Error: Frame buffer file not found: {buffer_file}{Colors.RESET}")
+        return []
 
     try:
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
+        with gzip.open(buffer_file, 'rt', encoding='utf-8') as f:
+            data = json.load(f)
 
-            parsed = parse_input_line(line)
-            if not parsed:
-                print(f"{Colors.YELLOW}Warning: Could not parse line: {line[:60]}...{Colors.RESET}")
-                continue
+        frames = []
+        for frame_data in data.get('frames', []):
+            frame_num = frame_data['frame_number']
+            timestamp = datetime.fromisoformat(frame_data['timestamp']).strftime('%H:%M:%S.%f')[:-3]
+            raw_bytes = base64.b64decode(frame_data['raw_bytes'])
+            frame_hex = raw_bytes.hex()
+            byte_count = str(len(raw_bytes))
+            direction = frame_data.get('direction', 'RX')
 
-            frame_num, timestamp, byte_count, frame_hex = parsed
+            frames.append((frame_num, timestamp, byte_count, frame_hex, direction))
 
-            # Decode the frame
-            decoded = decode_kiss_frame(frame_hex)
+        return frames
 
-            # Format and print output
-            output = format_frame_output(frame_num, timestamp, byte_count, decoded)
+    except Exception as e:
+        print(f"{Colors.RED}Error loading frame buffer: {e}{Colors.RESET}")
+        return []
+
+
+def analyze_frame(frame_num, timestamp, byte_count, frame_hex, direction='RX'):
+    """Analyze a single frame and return decoded data and output."""
+    # Decode the frame
+    decoded = decode_kiss_frame(frame_hex)
+
+    # Format output with direction indicator
+    header_text = f"Frame {frame_num} [{direction}]: {timestamp} ({byte_count} bytes)"
+    output = format_frame_output(frame_num, header_text, byte_count, decoded)
+
+    # Track ACKs
+    is_ack = (decoded.get('aprs') and
+              decoded['aprs'].get('details', {}).get('is_ack'))
+
+    ack_info = None
+    if is_ack:
+        src = decoded['ax25']['source']['full']
+        to = decoded['aprs']['details']['to']
+        msg_id = decoded['aprs']['details']['message_id']
+        ack_info = f"{src} -> {to} (ID: {msg_id})"
+
+    return decoded, output, ack_info
+
+
+def main():
+    """Main function - reads input and analyzes frames"""
+    parser = argparse.ArgumentParser(
+        description='KISS/AX.25/APRS Protocol Analyzer',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  # Analyze frames from stdin
+  %(prog)s
+
+  # Load and analyze all frames from buffer
+  %(prog)s --buffer
+
+  # Analyze specific frame numbers
+  %(prog)s --buffer --frames 42 43 44
+
+  # Analyze frame range
+  %(prog)s --buffer --range 100-150
+
+  # Use custom buffer file
+  %(prog)s --buffer-file /path/to/buffer.json.gz --frames 5
+        '''
+    )
+
+    parser.add_argument(
+        '--buffer', '-b',
+        action='store_true',
+        help='Load frames from frame buffer database (~/.console_frame_buffer.json.gz)'
+    )
+
+    parser.add_argument(
+        '--buffer-file',
+        metavar='FILE',
+        help='Custom frame buffer file path'
+    )
+
+    parser.add_argument(
+        '--frames', '-f',
+        nargs='+',
+        type=int,
+        metavar='N',
+        help='Specific frame numbers to analyze'
+    )
+
+    parser.add_argument(
+        '--range', '-r',
+        metavar='START-END',
+        help='Range of frame numbers (e.g., 100-150)'
+    )
+
+    parser.add_argument(
+        '--list', '-l',
+        action='store_true',
+        help='List all available frames without analyzing'
+    )
+
+    args = parser.parse_args()
+
+    # Determine source of frames
+    if args.buffer or args.buffer_file or args.frames or args.range or args.list:
+        # Load from buffer database
+        print(f"{Colors.BOLD}KISS/AX.25/APRS Protocol Analyzer{Colors.RESET}")
+        print(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}")
+
+        buffer_file = args.buffer_file if args.buffer_file else None
+        all_frames = load_frame_buffer(buffer_file)
+
+        if not all_frames:
+            return
+
+        print(f"Loaded {len(all_frames)} frames from buffer")
+
+        if all_frames:
+            print(f"Frame range: {all_frames[0][0]} to {all_frames[-1][0]}")
+
+        print(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}")
+        print()
+
+        # List mode
+        if args.list:
+            print(f"{Colors.BOLD}Available Frames:{Colors.RESET}\n")
+            for frame_num, timestamp, byte_count, _, direction in all_frames:
+                print(f"  [{direction}] Frame {frame_num:5d}: {timestamp} ({byte_count:4s} bytes)")
+            print()
+            return
+
+        # Determine which frames to analyze
+        frames_to_analyze = []
+
+        if args.frames:
+            # Specific frame numbers
+            frame_nums = set(args.frames)
+            frames_to_analyze = [f for f in all_frames if f[0] in frame_nums]
+
+            # Check for missing frames
+            found_nums = {f[0] for f in frames_to_analyze}
+            missing = frame_nums - found_nums
+            if missing:
+                print(f"{Colors.YELLOW}Warning: Frame(s) not found: {sorted(missing)}{Colors.RESET}\n")
+
+        elif args.range:
+            # Frame range
+            try:
+                start, end = map(int, args.range.split('-'))
+                frames_to_analyze = [f for f in all_frames if start <= f[0] <= end]
+
+                if not frames_to_analyze:
+                    print(f"{Colors.YELLOW}No frames in range {start}-{end}{Colors.RESET}")
+                    return
+
+            except ValueError:
+                print(f"{Colors.RED}Error: Invalid range format. Use START-END (e.g., 100-150){Colors.RESET}")
+                return
+
+        else:
+            # All frames
+            frames_to_analyze = all_frames
+
+        # Analyze selected frames
+        frames_analyzed = 0
+        acks_found = []
+
+        for frame_num, timestamp, byte_count, frame_hex, direction in frames_to_analyze:
+            decoded, output, ack_info = analyze_frame(frame_num, timestamp, byte_count, frame_hex, direction)
             print(output)
-
             frames_analyzed += 1
 
-            # Track ACKs
-            if (decoded.get('aprs') and
-                decoded['aprs'].get('details', {}).get('is_ack')):
-                src = decoded['ax25']['source']['full']
-                to = decoded['aprs']['details']['to']
-                msg_id = decoded['aprs']['details']['message_id']
-                acks_found.append(f"{src} -> {to} (ID: {msg_id})")
+            if ack_info:
+                acks_found.append(ack_info)
 
-    except KeyboardInterrupt:
-        print(f"\n{Colors.YELLOW}Interrupted by user{Colors.RESET}")
+    else:
+        # Original stdin mode
+        print(f"{Colors.BOLD}KISS/AX.25/APRS Protocol Analyzer{Colors.RESET}")
+        print(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}")
+        print()
+        print("Paste your frame capture below (one frame per line).")
+        print()
+        print("Supported formats:")
+        print("  [1] RX 11:49:44.979 (42b): c00092884040...")
+        print("  [DEBUG 12:31:24.651] TNC RX (54 bytes): c00092884040...")
+        print("  c00092884040...  (raw hex)")
+        print()
+        print("Press Ctrl+D (Linux/Mac) or Ctrl+Z then Enter (Windows) when done.")
+        print(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}")
+        print()
+
+        frames_analyzed = 0
+        acks_found = []
+
+        try:
+            for line in sys.stdin:
+                line = line.strip()
+                if not line:
+                    continue
+
+                parsed = parse_input_line(line)
+                if not parsed:
+                    print(f"{Colors.YELLOW}Warning: Could not parse line: {line[:60]}...{Colors.RESET}")
+                    continue
+
+                frame_num, timestamp, byte_count, frame_hex = parsed
+                decoded, output, ack_info = analyze_frame(frame_num, timestamp, byte_count, frame_hex)
+                print(output)
+                frames_analyzed += 1
+
+                if ack_info:
+                    acks_found.append(ack_info)
+
+        except KeyboardInterrupt:
+            print(f"\n{Colors.YELLOW}Interrupted by user{Colors.RESET}")
 
     # Summary
     print()
