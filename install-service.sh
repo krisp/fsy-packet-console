@@ -122,8 +122,8 @@ ExecStart=/usr/bin/screen -dmS ${SERVICE_NAME} ${PYTHON_EXEC} main.py ${EXEC_ARG
 # Send SIGINT (Ctrl+C) for graceful shutdown
 KillSignal=SIGINT
 
-# Allow up to 15 seconds for graceful shutdown (important for Bluetooth cleanup)
-TimeoutStopSec=15
+# Allow up to 30 seconds for graceful shutdown (important for Bluetooth cleanup)
+TimeoutStopSec=30
 
 # Restart on failure
 Restart=on-failure
