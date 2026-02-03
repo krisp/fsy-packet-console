@@ -2418,11 +2418,12 @@ class APRSManager:
             # Default to last heard
             return sorted(stations, key=lambda x: x.timestamp, reverse=True)
 
-    def get_zambretti_forecast(self, callsign: str) -> Optional[Dict]:
+    def get_zambretti_forecast(self, callsign: str, pressure_threshold: float = 0.3) -> Optional[Dict]:
         """Generate Zambretti weather forecast for a station.
 
         Args:
             callsign: Station callsign to generate forecast for
+            pressure_threshold: Pressure tendency threshold in mb/hr (default: 0.3)
 
         Returns:
             Dictionary with forecast data or None if insufficient data:
@@ -2474,10 +2475,15 @@ class APRSManager:
                     pressure_change = new_pressure - old_pressure
                     hourly_rate = pressure_change / time_diff_hours
 
-                    # Thresholds based on meteorological standards
-                    # Rising/falling: > ±0.5 mb/hr is significant
-                    # Rapid: > ±1.5 mb/hr
-                    if abs(hourly_rate) < 0.15:
+                    # Pressure tendency thresholds
+                    # WMO/NOAA standard: ±0.17 mb/hr (0.5 mb in 3 hours)
+                    # Default 0.30 mb/hr (~1.0 mb in 3 hours) for Zambretti because:
+                    # - Zambretti (1915) doesn't account for air mass characteristics
+                    # - Small pressure changes don't always indicate weather change
+                    # - More conservative threshold prevents false "showery" forecasts
+                    # - Better matches modern forecasting which uses humidity, temperature, etc.
+                    # Configurable via WXTREND TNC command
+                    if abs(hourly_rate) < pressure_threshold:
                         trend = 'steady'
                         confidence = 'high' if time_diff_hours >= 3 else 'medium'
                     elif hourly_rate > 0:
@@ -3714,11 +3720,12 @@ class APRSManager:
             "hops": station.hop_count,
         }
 
-    def format_station_detail(self, station: APRSStation) -> str:
+    def format_station_detail(self, station: APRSStation, pressure_threshold: float = 0.3) -> str:
         """Format detailed station information.
 
         Args:
             station: Station to format
+            pressure_threshold: Pressure tendency threshold for Zambretti forecast (default: 0.3 mb/hr)
 
         Returns:
             Formatted multi-line string with all station details
@@ -3828,7 +3835,7 @@ class APRSManager:
                 lines.append(self._format_wind_rose(station.weather_history))
 
             # Add Zambretti weather forecast if pressure available
-            forecast = self.get_zambretti_forecast(station.callsign)
+            forecast = self.get_zambretti_forecast(station.callsign, pressure_threshold=pressure_threshold)
             if forecast:
                 lines.append("")
                 lines.append("Forecast (Zambretti):")

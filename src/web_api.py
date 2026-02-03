@@ -185,7 +185,7 @@ def serialize_station(station: APRSStation, include_history: bool = False) -> Di
 class APIHandlers:
     """HTTP request handlers for the APRS Web API."""
 
-    def __init__(self, aprs_manager, get_mycall, start_time, get_mylocation=None):
+    def __init__(self, aprs_manager, get_mycall, start_time, get_mylocation=None, get_wxtrend=None):
         """Initialize API handlers.
 
         Args:
@@ -193,10 +193,12 @@ class APIHandlers:
             get_mycall: Callable that returns current MYCALL
             start_time: Server start datetime
             get_mylocation: Callable that returns current MYLOCATION (optional)
+            get_wxtrend: Callable that returns current WXTREND threshold (optional)
         """
         self.aprs = aprs_manager
         self.get_mycall = get_mycall
         self.get_mylocation = get_mylocation or (lambda: "")
+        self.get_wxtrend = get_wxtrend or (lambda: "0.3")
         self.start_time = start_time
 
     async def handle_get_stations(self, request: web.Request) -> web.Response:
@@ -346,7 +348,13 @@ class APIHandlers:
                 status=400
             )
 
-        forecast = self.aprs.get_zambretti_forecast(callsign)
+        # Get WXTREND threshold from config
+        try:
+            threshold = float(self.get_wxtrend())
+        except (ValueError, TypeError):
+            threshold = 0.3  # Default fallback
+
+        forecast = self.aprs.get_zambretti_forecast(callsign, pressure_threshold=threshold)
 
         if forecast is None:
             return web.json_response(

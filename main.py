@@ -74,8 +74,14 @@ class TeeLogger:
 if __name__ == "__main__":
     import argparse
     from src.console import run
+    from src import constants
 
     parser = argparse.ArgumentParser(description="FSY Packet Console")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"FSY Packet Console v{constants.VERSION}",
+    )
     parser.add_argument(
         "-t", "--tnc", action="store_true", help="Start in TNC mode"
     )

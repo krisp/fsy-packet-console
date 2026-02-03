@@ -1,5 +1,8 @@
 """Constants and configuration for the radio console."""
 
+# --- Version ---
+VERSION = "0.8.7"
+
 # --- Configuration ---
 TNC_TCP_PORT = 8001
 HEARTBEAT_INTERVAL = 10  # seconds

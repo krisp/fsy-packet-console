@@ -1036,6 +1036,7 @@ class TNCConfig:
             "WX_PORT": "",  # Port number for network stations (blank = auto)
             "WX_INTERVAL": "300",  # Update interval in seconds (300 = 5 minutes)
             "WX_AVERAGE_WIND": "ON",  # Average wind over beacon interval (ON/OFF)
+            "WXTREND": "0.3",  # Pressure tendency threshold in mb/hr for Zambretti (0.3 = ~1.0 mb in 3 hours)
         }
         self.load()
 
@@ -3772,7 +3773,12 @@ class CommandProcessor:
                     return
 
                 print_header(f"Station Details: {callsign}")
-                detail = self.aprs_manager.format_station_detail(station)
+                # Get WXTREND threshold from config
+                try:
+                    threshold = float(self.tnc_config.get("WXTREND"))
+                except (ValueError, TypeError):
+                    threshold = 0.3  # Default fallback
+                detail = self.aprs_manager.format_station_detail(station, pressure_threshold=threshold)
                 print_pt(detail)
 
             else:
@@ -4981,6 +4987,35 @@ class CommandProcessor:
             self.tnc_config.set("WX_AVERAGE_WIND", value)
             self.weather_manager.average_wind = (value == "ON")
             print_info(f"WX_AVERAGE_WIND set to {value}")
+
+        elif cmd == "WXTREND":
+            if not args:
+                threshold = self.tnc_config.get("WXTREND")
+                print_pt(f"WXTREND: {threshold} mb/hr")
+                print_pt("")
+                print_pt("Pressure tendency threshold for Zambretti weather forecasting:")
+                print_pt("  - Determines when pressure is 'rising', 'falling', or 'steady'")
+                print_pt("  - Higher values = less sensitive (fewer weather change predictions)")
+                print_pt("  - Lower values = more sensitive (more weather change predictions)")
+                print_pt("")
+                print_pt("Recommended values:")
+                print_pt("  0.17 - WMO/NOAA standard (0.5 mb in 3 hours)")
+                print_pt("  0.30 - Default (conservative, fewer false alarms)")
+                print_pt("  0.50 - Very conservative")
+                return
+
+            try:
+                value = float(args[0])
+                if value < 0.05 or value > 1.0:
+                    print_error("WXTREND must be between 0.05 and 1.0 mb/hr")
+                    return
+
+                self.tnc_config.set("WXTREND", str(value))
+                print_info(f"WXTREND set to {value} mb/hr")
+                print_pt("")
+                print_pt("Note: This affects Zambretti forecasts for all weather stations")
+            except ValueError:
+                print_error("WXTREND must be a number (e.g., 0.3)")
 
         elif cmd == "DIGIPEATER" or cmd == "DIGI":
             # Digipeater mode control
@@ -6653,7 +6688,7 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
         constants.DEBUG = True
         print_info("Debug mode enabled at startup")
 
-    print_header("FSY Packet Console")
+    print_header(f"FSY Packet Console v{constants.VERSION}")
 
     rx_queue = asyncio.Queue()
     tnc_queue = asyncio.Queue()
@@ -6870,7 +6905,8 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
                 radio=radio,
                 aprs_manager=radio.aprs_manager,
                 get_mycall=lambda: tnc_config.get("MYCALL"),
-                get_mylocation=lambda: tnc_config.get("MYLOCATION")
+                get_mylocation=lambda: tnc_config.get("MYLOCATION"),
+                get_wxtrend=lambda: tnc_config.get("WXTREND")
             )
 
             started = await radio.web_server.start(host=webui_host, port=webui_port)

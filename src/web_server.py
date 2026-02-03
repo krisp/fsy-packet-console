@@ -23,7 +23,7 @@ from .web_api import APIHandlers, serialize_station, serialize_weather
 class WebServer:
     """Async web server for APRS console UI."""
 
-    def __init__(self, radio, aprs_manager, get_mycall: Callable[[], str], get_mylocation: Callable[[], str] = None):
+    def __init__(self, radio, aprs_manager, get_mycall: Callable[[], str], get_mylocation: Callable[[], str] = None, get_wxtrend: Callable[[], str] = None):
         """Initialize web server.
 
         Args:
@@ -31,11 +31,13 @@ class WebServer:
             aprs_manager: APRSManager instance
             get_mycall: Callable that returns current MYCALL
             get_mylocation: Callable that returns current MYLOCATION (optional)
+            get_wxtrend: Callable that returns current WXTREND threshold (optional)
         """
         self.radio = radio
         self.aprs = aprs_manager
         self.get_mycall = get_mycall
         self.get_mylocation = get_mylocation or (lambda: "")
+        self.get_wxtrend = get_wxtrend or (lambda: "0.3")
         self.app = None
         self.runner = None
         self.site = None
@@ -70,7 +72,7 @@ class WebServer:
             ])
 
             # Create API handlers
-            api_handlers = APIHandlers(self.aprs, self.get_mycall, self.start_time, self.get_mylocation)
+            api_handlers = APIHandlers(self.aprs, self.get_mycall, self.start_time, self.get_mylocation, self.get_wxtrend)
 
             # Setup routes
             self.app.router.add_get('/', self._handle_index)
