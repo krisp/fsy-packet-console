@@ -434,6 +434,44 @@ cat frames.txt | ./analyze_frames.py   # Optional external analyzer
 - ✅ **Filterable** - focus on specific stations or time ranges
 - ✅ **Complete decode** - KISS → AX.25 → APRS in one view
 
+#### **Offline Frame Analysis with analyze_frames.py**
+
+The `analyze_frames.py` tool provides powerful offline forensic analysis of captured frames from the frame buffer database:
+
+```bash
+# List all captured frames
+./analyze_frames.py --buffer --list
+
+# Analyze specific frames that had errors
+./analyze_frames.py --buffer --frames 1234 1235 1236
+
+# Analyze a range of frames
+./analyze_frames.py --buffer --range 1000-1100
+
+# Analyze all frames in buffer
+./analyze_frames.py --buffer
+
+# Use custom buffer file
+./analyze_frames.py --buffer-file /path/to/buffer.json.gz --frames 42
+```
+
+**Features:**
+- ✅ **Load from frame buffer database** (`~/.console_frame_buffer.json.gz`)
+- ✅ **Selective frame analysis** by number or range
+- ✅ **Wireshark-style output** with full layer decode
+- ✅ **Shows RX/TX direction** for each frame
+- ✅ **Preserves timestamps** from live capture
+- ✅ **Backward compatible** with stdin input
+
+**Use Cases:**
+- **Post-mortem debugging** - Analyze frames from earlier sessions
+- **Intermittent issue diagnosis** - Examine specific problem frames
+- **Protocol learning** - Study real APRS/AX.25 traffic
+- **ACK tracking** - Find missing acknowledgments
+- **Path analysis** - Understand digipeater routing
+
+The frame buffer is automatically saved every 100 frames and persists across console restarts, giving you a complete capture history for offline analysis.
+
 ### 🎛️ TNC-Style Configuration
 
 **TNC-2 compatible command set** for familiar operation. **These configuration commands are ONLY available in TNC mode (`tnc>` prompt)**:
