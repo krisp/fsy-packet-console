@@ -1,0 +1,35 @@
+[Unit]
+Description=FSY Packet Console - APRS TNC and Web UI
+Documentation=file:///home/dave/mnt/fsy-packet-console/doc/README.md
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+User=dave
+WorkingDirectory=/home/dave/mnt/fsy-packet-console
+
+# Start the console in a screen session
+ExecStart=/usr/bin/screen -dmS fsy-console python main.py
+
+# Stop gracefully (send Ctrl+C to screen session)
+ExecStop=/usr/bin/screen -S fsy-console -X quit
+
+# Restart on failure
+Restart=on-failure
+RestartSec=10
+
+# Cleanup on stop
+KillMode=process
+
+# Logging to syslog
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fsy-console
+
+# Process limits (optional but recommended)
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

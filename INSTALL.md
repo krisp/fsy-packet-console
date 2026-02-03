@@ -125,6 +125,64 @@ On first startup, the console will:
 - Start the web UI server (default: http://localhost:8080)
 - Start the AGWPE bridge (if enabled)
 
+## Running as a System Service (Optional)
+
+For production deployments, you can run the console as a systemd service that automatically starts on boot and runs in a screen session.
+
+### Quick Setup
+
+```bash
+# Copy the service file
+sudo cp fsy-console.service /etc/systemd/system/
+
+# Reload systemd
+sudo systemctl daemon-reload
+
+# Enable auto-start on boot
+sudo systemctl enable fsy-console.service
+
+# Start the service now
+sudo systemctl start fsy-console.service
+
+# Check status
+systemctl status fsy-console.service
+```
+
+### Accessing the Console
+
+When running as a service, the console runs in a screen session that you can attach to:
+
+```bash
+# Attach to the running console
+screen -r fsy-console
+
+# Detach without stopping (Ctrl+A, then D)
+```
+
+### Managing the Service
+
+```bash
+# Stop the service
+sudo systemctl stop fsy-console.service
+
+# Restart the service
+sudo systemctl restart fsy-console.service
+
+# View logs
+journalctl -u fsy-console.service -f
+
+# Disable auto-start
+sudo systemctl disable fsy-console.service
+```
+
+**Benefits:**
+- ✅ Auto-start on boot
+- ✅ Auto-restart if the console crashes
+- ✅ Centralized logging via journalctl
+- ✅ Still interactive via screen session
+
+See [SYSTEMD_SETUP.md](SYSTEMD_SETUP.md) for detailed configuration options and troubleshooting.
+
 ## Troubleshooting
 
 ### "Building wheel for dbus-fast" takes too long
