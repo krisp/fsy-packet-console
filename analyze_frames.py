@@ -653,8 +653,28 @@ Examples:
         # List mode
         if args.list:
             print(f"{Colors.BOLD}Available Frames:{Colors.RESET}\n")
-            for frame_num, timestamp, byte_count, _, direction in all_frames:
-                print(f"  [{direction}] Frame {frame_num:5d}: {timestamp} ({byte_count:4s} bytes)")
+            for frame_num, timestamp, byte_count, frame_hex, direction in all_frames:
+                # Decode frame to get callsigns and payload preview
+                decoded = decode_kiss_frame(frame_hex)
+
+                # Extract callsigns
+                if 'error' in decoded:
+                    from_call = "ERROR"
+                    to_call = "ERROR"
+                    payload_preview = decoded['error']
+                else:
+                    from_call = decoded['ax25']['source']['full']
+                    to_call = decoded['ax25']['destination']['full']
+
+                    # Get payload preview (first 40 chars)
+                    if decoded.get('info'):
+                        payload_text = decoded['info']['text']
+                        payload_preview = payload_text[:40] + '...' if len(payload_text) > 40 else payload_text
+                    else:
+                        payload_preview = "(no info field)"
+
+                # Format output as single line
+                print(f"  [{direction}] Frame {frame_num:5d}: {timestamp} ({byte_count:4s}b) {Colors.GREEN}{from_call:12}{Colors.RESET} → {Colors.GREEN}{to_call:12}{Colors.RESET} {Colors.MAGENTA}{payload_preview}{Colors.RESET}")
             print()
             return
 
