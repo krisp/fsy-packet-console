@@ -36,13 +36,19 @@ def print_pt(*args, **kwargs):
             # Convert formatted text to plain text
             if args:
                 text = to_plain_text(args[0])
-                # Add timestamp at start of line
                 timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                _console_log_file.write(f"[{timestamp}] {text}\n")
+
+                # Handle multi-line text - add timestamp to each non-empty line
+                lines = text.split('\n')
+                for line in lines:
+                    # Write timestamp + line (even if line is empty)
+                    _console_log_file.write(f"[{timestamp}] {line}\n")
+
                 _console_log_file.flush()
-        except Exception:
-            # Silently ignore logging errors
-            pass
+        except Exception as e:
+            # Print logging errors for debugging
+            import sys
+            print(f"[LOGGING ERROR] {type(e).__name__}: {e}", file=sys.__stderr__)
 
 
 def timestamp():
