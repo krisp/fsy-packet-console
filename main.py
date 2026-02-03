@@ -7,18 +7,59 @@ Professional packet radio and APRS platform with universal TNC support.
 
 import os
 import sys
+from datetime import datetime
 
 
 class TeeLogger:
-    """Write to both a file and the original stream."""
+    """Write to both a file and the original stream with timestamps."""
+
+    MAX_LOG_SIZE = 10 * 1024 * 1024  # 10MB
 
     def __init__(self, file_path, original_stream):
-        self.file = open(os.path.expanduser(file_path), 'a', buffering=1)
+        self.file_path = os.path.expanduser(file_path)
         self.original = original_stream
+        self.at_line_start = True
+
+        # Rotate log if it's too large
+        self._rotate_if_needed()
+
+        # Open in append mode
+        self.file = open(self.file_path, 'a', buffering=1)
+
+    def _rotate_if_needed(self):
+        """Rotate log file if it exceeds MAX_LOG_SIZE."""
+        if os.path.exists(self.file_path):
+            size = os.path.getsize(self.file_path)
+            if size > self.MAX_LOG_SIZE:
+                # Rename old log with timestamp
+                timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+                backup_path = f"{self.file_path}.{timestamp}"
+                os.rename(self.file_path, backup_path)
+                print(f"Rotated log: {backup_path}", file=sys.__stderr__)
 
     def write(self, data):
+        # Write to terminal without modification
         self.original.write(data)
-        self.file.write(data)
+
+        # Write to file with timestamps
+        if data:
+            lines = data.split('\n')
+            for i, line in enumerate(lines):
+                if i > 0:
+                    # We had a newline, so next line needs timestamp
+                    self.at_line_start = True
+
+                # Add timestamp at start of line
+                if line:  # Don't timestamp empty lines
+                    if self.at_line_start:
+                        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                        self.file.write(f"[{timestamp}] ")
+                        self.at_line_start = False
+                    self.file.write(line)
+
+                # Add newline back if this wasn't the last line
+                if i < len(lines) - 1:
+                    self.file.write('\n')
 
     def flush(self):
         self.original.flush()
@@ -85,9 +126,9 @@ if __name__ == "__main__":
         "-l",
         "--log",
         nargs="?",
-        const="~/.fsy-console",
+        const="~/.fsy-console.log",
         metavar="FILE",
-        help="Log all console output to file (default: ~/.fsy-console)",
+        help="Log all console output to file (default: ~/.fsy-console.log)",
     )
 
     args = parser.parse_args()
@@ -119,9 +160,12 @@ if __name__ == "__main__":
     # Install logging to file if requested
     log_file = None
     if args.log:
+        log_path = os.path.expanduser(args.log)
+        print(f"Logging to: {log_path}", file=sys.stderr)
         log_file = TeeLogger(args.log, sys.stdout)
         sys.stdout = log_file
         sys.stderr = log_file
+        print(f"Logging enabled to: {log_path}")
 
     try:
         run(
