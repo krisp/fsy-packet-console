@@ -5,8 +5,8 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from prompt_toolkit import print_formatted_text as print_pt
-from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit import print_formatted_text as _print_pt_original
+from prompt_toolkit.formatted_text import HTML, to_plain_text
 
 from . import constants
 
@@ -14,6 +14,35 @@ from . import constants
 # Debug log file handle (for DEBUG_LEVEL >= 5)
 _debug_log_file = None
 _debug_log_path = None
+
+# Console log file handle (for -l option)
+_console_log_file = None
+
+
+def set_console_log_file(file_handle):
+    """Set the console log file handle for print_pt output."""
+    global _console_log_file
+    _console_log_file = file_handle
+
+
+def print_pt(*args, **kwargs):
+    """Wrapper for print_formatted_text that also logs to file if enabled."""
+    # Always print to terminal
+    _print_pt_original(*args, **kwargs)
+
+    # Also write to console log if enabled
+    if _console_log_file:
+        try:
+            # Convert formatted text to plain text
+            if args:
+                text = to_plain_text(args[0])
+                # Add timestamp at start of line
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                _console_log_file.write(f"[{timestamp}] {text}\n")
+                _console_log_file.flush()
+        except Exception:
+            # Silently ignore logging errors
+            pass
 
 
 def timestamp():

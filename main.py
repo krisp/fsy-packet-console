@@ -158,11 +158,24 @@ if __name__ == "__main__":
     # Install logging to file if requested
     log_file = None
     if args.log:
+        from src.utils import set_console_log_file
+
         log_path = os.path.expanduser(args.log)
         print(f"Logging to: {log_path}", file=sys.stderr)
-        log_file = TeeLogger(args.log, sys.stdout)
-        sys.stdout = log_file
-        sys.stderr = log_file
+
+        # Open log file with rotation
+        MAX_LOG_SIZE = 10 * 1024 * 1024  # 10MB
+        if os.path.exists(log_path) and os.path.getsize(log_path) > MAX_LOG_SIZE:
+            timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+            backup_path = f"{log_path}.{timestamp}"
+            os.rename(log_path, backup_path)
+            print(f"Rotated log: {backup_path}", file=sys.stderr)
+
+        log_file = open(log_path, 'a', buffering=1)
+
+        # Set up logging for prompt_toolkit output (print_pt)
+        set_console_log_file(log_file)
+
         print(f"Logging enabled to: {log_path}")
 
     try:
