@@ -68,8 +68,11 @@ WorkingDirectory=${PROJECT_DIR}
 # Start the console in a screen session
 ExecStart=/usr/bin/screen -dmS ${SERVICE_NAME} ${PYTHON_EXEC} main.py
 
-# Stop gracefully
+# Stop gracefully - send SIGTERM to allow cleanup
 ExecStop=/usr/bin/screen -S ${SERVICE_NAME} -X quit
+
+# Allow up to 15 seconds for graceful shutdown (important for Bluetooth cleanup)
+TimeoutStopSec=15
 
 # Restart on failure
 Restart=on-failure

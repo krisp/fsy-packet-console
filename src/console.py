@@ -10,6 +10,7 @@ import html
 import json
 import os
 import re
+import signal
 import socket
 import sys
 import time
@@ -6531,7 +6532,7 @@ async def connection_watcher(radio):
             print_error(f"Connection watcher error: {e}")
 
 
-async def command_loop(radio, auto_tnc=False, auto_connect=None, serial_mode=False):
+async def command_loop(radio, auto_tnc=False, auto_connect=None, serial_mode=False, shutdown_event=None):
     """Command input loop with pinned prompt."""
     processor = CommandProcessor(radio, serial_mode=serial_mode)
 
@@ -6615,6 +6616,12 @@ async def command_loop(radio, auto_tnc=False, auto_connect=None, serial_mode=Fal
     with patch_stdout():
         while radio.running:
             try:
+                # Check for shutdown signal
+                if shutdown_event and shutdown_event.is_set():
+                    print_pt("")
+                    await processor.cmd_quit([])
+                    break
+
                 # Build prompt with mode and unread message indicator
                 mode_name = processor.console_mode
                 unread = processor.aprs_manager.get_unread_count()
@@ -6645,7 +6652,7 @@ async def command_loop(radio, auto_tnc=False, auto_connect=None, serial_mode=Fal
 
 async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
                serial_port=None, serial_baud=9600, tcp_host=None, tcp_port=8001,
-               radio_mac=None):
+               radio_mac=None, shutdown_event=None):
     # Enable debug mode if requested via command line
     if auto_debug:
         constants.DEBUG_LEVEL = 2
@@ -6912,7 +6919,8 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
             asyncio.create_task(
                 command_loop(
                     radio, auto_tnc=auto_tnc, auto_connect=auto_connect,
-                    serial_mode=(serial_port is not None or tcp_host is not None)
+                    serial_mode=(serial_port is not None or tcp_host is not None),
+                    shutdown_event=shutdown_event
                 )
             )
         )
@@ -6961,6 +6969,20 @@ def run(auto_tnc=False, auto_connect=None, auto_debug=False,
         serial_port=None, serial_baud=9600, tcp_host=None, tcp_port=8001,
         radio_mac=None):
     """Entry point for the console application."""
+    # Flag to track if we're shutting down
+    shutdown_event = asyncio.Event()
+
+    def signal_handler(signum, frame):
+        """Handle SIGTERM and SIGINT for graceful shutdown."""
+        sig_name = signal.Signals(signum).name
+        print_pt(HTML(f"\n<yellow>Received {sig_name}, shutting down gracefully...</yellow>"))
+        # Set the shutdown event (will be checked by command loop)
+        shutdown_event.set()
+
+    # Register signal handlers
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
     try:
         asyncio.run(
             main(
@@ -6972,6 +6994,7 @@ def run(auto_tnc=False, auto_connect=None, auto_debug=False,
                 tcp_host=tcp_host,
                 tcp_port=tcp_port,
                 radio_mac=radio_mac,
+                shutdown_event=shutdown_event,
             )
         )
     except KeyboardInterrupt:

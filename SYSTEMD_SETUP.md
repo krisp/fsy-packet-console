@@ -2,30 +2,50 @@
 
 This guide explains how to set up the FSY Packet Console to run as a systemd service that automatically starts a screen session on boot.
 
-## Installation Steps
+## Quick Installation
 
-### 1. Copy Service File to Systemd Directory
+The easiest way to install the service is using the provided installation script:
 
 ```bash
-sudo cp fsy-console.service /etc/systemd/system/
+./install-service.sh
 ```
 
-### 2. Reload Systemd Daemon
+The script will:
+- Auto-detect your Python environment (virtual environment or system Python)
+- Auto-detect paths and user settings
+- Create a customized service file for your system
+- Install it to `/etc/systemd/system/fsy-console.service`
+- Optionally enable auto-start on boot
+- Optionally start the service immediately
+
+### Installation Example
 
 ```bash
-sudo systemctl daemon-reload
-```
+$ ./install-service.sh
+==========================================
+FSY Packet Console - Service Installer
+==========================================
 
-### 3. Enable Service (Auto-start on Boot)
+✓ Found virtual environment: ~/venv
 
-```bash
-sudo systemctl enable fsy-console.service
-```
+Configuration:
+  User:              dave
+  Home Directory:    /home/dave
+  Project Directory: /home/dave/mnt/fsy-packet-console
+  Python Executable: /home/dave/venv/bin/python
 
-### 4. Start the Service
+Install service with these settings? [y/N] y
 
-```bash
-sudo systemctl start fsy-console.service
+Creating service file...
+Installing service file to /etc/systemd/system/fsy-console.service...
+Reloading systemd daemon...
+✓ Service installed successfully!
+
+Enable auto-start on boot? [y/N] y
+✓ Auto-start enabled
+
+Start the service now? [y/N] y
+✓ Service started
 ```
 
 ## Basic Usage
@@ -40,7 +60,7 @@ Output example:
 ```
 ● fsy-console.service - FSY Packet Console - APRS TNC and Web UI
      Loaded: loaded (/etc/systemd/system/fsy-console.service; enabled; preset: enabled)
-     Active: active (running) since Mon 2026-02-02 10:15:00 UTC; 5s ago
+     Active: active (running) since Mon 2026-02-03 10:15:00 UTC; 5s ago
    Main PID: 12345 (screen)
       Tasks: 2 (limit: 4915)
      Memory: 45.2M
@@ -80,23 +100,33 @@ To detach from screen without stopping it:
 Ctrl+A, then D
 ```
 
-### Stop the Service
+### Control Service
 
 ```bash
+# Start the service
+sudo systemctl start fsy-console.service
+
+# Stop the service (graceful shutdown with 15-second timeout)
 sudo systemctl stop fsy-console.service
-```
 
-### Restart the Service
-
-```bash
+# Restart the service
 sudo systemctl restart fsy-console.service
-```
 
-### Disable Auto-start (but keep installed)
+# Enable auto-start on boot
+sudo systemctl enable fsy-console.service
 
-```bash
+# Disable auto-start (but keep installed)
 sudo systemctl disable fsy-console.service
 ```
+
+## Graceful Shutdown
+
+The service is configured with a 15-second timeout for graceful shutdown (`TimeoutStopSec=15`). This is important for:
+- **Bluetooth cleanup**: Allows time to properly disconnect from the radio
+- **Database saving**: Ensures APRS station data is saved
+- **Frame buffer**: Saves frame history to disk
+
+When you stop the service, the console receives a SIGTERM signal and performs orderly shutdown before the connection is terminated.
 
 ## Advanced Configuration
 
@@ -108,19 +138,30 @@ journalctl -u fsy-console.service -n 100
 ```
 
 Common issues:
-- **Working directory doesn't exist**: Check `/home/dave/mnt/fsy-packet-console` path
-- **User doesn't exist**: Change `User=dave` to your username
-- **Python not found**: Use full path `/usr/bin/python3` instead of `python`
+- **Working directory doesn't exist**: Re-run `./install-service.sh` from the correct location
+- **Python not found**: Check that virtual environment still exists at the configured path
 - **Screen not installed**: `sudo apt install screen`
+- **Port conflicts**: Check if AGWPE (8000), TNC (8001), or Web UI (8002) ports are in use
 
-### Running as Different User
+### Reinstalling or Updating Service
 
-Edit `/etc/systemd/system/fsy-console.service`:
-```ini
-User=your_username
+If you move the project directory or change Python environments, simply re-run the installation script:
+
+```bash
+./install-service.sh
 ```
 
-Then:
+The script will detect the new configuration and update the service file automatically.
+
+### Manual Service File Editing
+
+If you need to make manual changes to the service file:
+
+```bash
+sudo systemctl edit --full fsy-console.service
+```
+
+After editing:
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl restart fsy-console.service
@@ -128,54 +169,11 @@ sudo systemctl restart fsy-console.service
 
 ### Running with Environment Variables
 
-If you need custom environment variables (e.g., `PYTHONUNBUFFERED=1`):
-
-Add to the `[Service]` section:
+To add custom environment variables, edit the service file and add to the `[Service]` section:
 ```ini
 Environment="PYTHONUNBUFFERED=1"
 Environment="TZ=America/New_York"
 ```
-
-### Custom Python Environment
-
-If using a virtual environment:
-
-```ini
-ExecStart=/usr/bin/screen -dmS fsy-console /home/dave/mnt/fsy-packet-console/venv/bin/python main.py
-```
-
-## Useful System Commands
-
-### Auto-restart on Failure
-
-The service is already configured to restart on failure:
-```ini
-Restart=on-failure
-RestartSec=10
-```
-
-This means if the console crashes, systemd will restart it after 10 seconds.
-
-### View System Boot Messages
-
-```bash
-dmesg | grep fsy-console
-```
-
-### List All Active Services
-
-```bash
-systemctl list-units --type=service --state=running
-```
-
-### Edit Service (Advanced)
-
-To edit the service file directly:
-```bash
-sudo systemctl edit fsy-console.service
-```
-
-This opens an editor for custom modifications that persist over updates.
 
 ## Screen Session Quick Reference
 
@@ -211,7 +209,7 @@ screen -S fsy-console -X stuff "help\n"
 screen -S fsy-console -X quit
 ```
 
-Or via systemd:
+Or via systemd (recommended):
 ```bash
 sudo systemctl stop fsy-console.service
 ```
@@ -268,10 +266,23 @@ If you get "Cannot open your terminal '/dev/pts/X'" error:
    tty
    ```
 
-2. Try attaching from same user that started the service:
+2. Try attaching as the same user that runs the service:
    ```bash
-   sudo su - dave
    screen -r fsy-console
+   ```
+
+### Graceful Shutdown Takes Too Long
+
+If you see timeout warnings during shutdown:
+
+1. Check logs to see what's delaying shutdown:
+   ```bash
+   journalctl -u fsy-console.service | tail -50
+   ```
+
+2. If Bluetooth disconnection is slow, you may need to increase the timeout by editing the service file:
+   ```ini
+   TimeoutStopSec=30
    ```
 
 ## Logs and Monitoring
@@ -302,11 +313,12 @@ journalctl -u fsy-console.service > fsy-console-logs.txt
 
 ✅ **Auto-start on boot**: Console starts automatically after system reboot
 ✅ **Auto-restart**: Restarts if process crashes
+✅ **Graceful shutdown**: 15-second timeout for clean Bluetooth disconnection
 ✅ **Centralized logging**: Logs go to journalctl (searchable, timestamped)
 ✅ **Easy control**: Standard systemctl commands
 ✅ **Screen session**: Interactive access via `screen -r`
-✅ **Graceful shutdown**: Service manager handles cleanup
 ✅ **System integration**: Works with system boot order (After=network.target)
+✅ **Auto-configuration**: Installation script detects paths and Python environment
 
 ## Testing the Setup
 
@@ -336,6 +348,14 @@ sudo systemctl restart fsy-console.service
 journalctl -u fsy-console.service -f
 ```
 
+### Test 4: Graceful Shutdown
+
+```bash
+sudo systemctl stop fsy-console.service
+journalctl -u fsy-console.service -n 20
+# Should see messages about saving database, frame buffer, and disconnecting
+```
+
 ## Removing the Service
 
 If you want to completely remove the service:
@@ -354,10 +374,43 @@ sudo rm /etc/systemd/system/fsy-console.service
 sudo systemctl daemon-reload
 ```
 
+## Service Configuration Details
+
+The installation script creates a service with these key features:
+
+```ini
+[Unit]
+Description=FSY Packet Console - APRS TNC and Web UI
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+User=<your-user>
+WorkingDirectory=<project-directory>
+ExecStart=/usr/bin/screen -dmS fsy-console <python-path> main.py
+ExecStop=/usr/bin/screen -S fsy-console -X quit
+TimeoutStopSec=15         # 15 seconds for graceful shutdown
+Restart=on-failure
+RestartSec=10
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Key points:
+- **Type=forking**: Screen creates a background daemon process
+- **TimeoutStopSec=15**: Allows time for Bluetooth cleanup before forced termination
+- **Restart=on-failure**: Auto-restarts if console crashes
+- **KillMode=process**: Only kills the main process (screen), not child processes
+- **After=network.target**: Waits for network before starting (important for KISS-over-TCP mode)
+
 ## Notes
 
-- The service runs as user `dave`. Change this if using a different user.
-- Working directory is `/home/dave/mnt/fsy-packet-console`. Update if path is different.
-- The service file uses `Type=forking` because screen creates a background process.
-- Logs are sent to systemd journal (viewable with `journalctl`).
-- The service automatically restarts on failure with a 10-second delay.
+- The service is created with your current user and paths automatically detected
+- Working directory is set to the project location where you ran `install-service.sh`
+- Python executable is auto-detected (prefers virtual environments)
+- Logs are sent to systemd journal (viewable with `journalctl`)
+- The service automatically restarts on failure with a 10-second delay
+- Graceful shutdown includes 15-second timeout for clean Bluetooth disconnection
