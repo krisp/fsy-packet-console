@@ -1,16 +1,18 @@
 [Unit]
 Description=FSY Packet Console - APRS TNC and Web UI
-Documentation=file:///home/dave/mnt/fsy-packet-console/doc/README.md
 After=network.target
 Wants=network-online.target
 
 [Service]
 Type=forking
-User=dave
-WorkingDirectory=/home/dave/mnt/fsy-packet-console
+# User will be current user who installs the service
+User=pi
+# WorkingDirectory will be the project directory
+WorkingDirectory=/home/pi/fsy-packet-console
 
-# Start the console in a screen session
-ExecStart=/usr/bin/screen -dmS fsy-console python main.py
+# Start the console in a screen session with bash wrapper
+# This ensures virtual environment is activated
+ExecStart=/usr/bin/screen -dmS fsy-console /bin/bash -c 'cd /home/pi/fsy-packet-console && source /home/pi/conole-venv/bin/activate && exec python main.py'
 
 # Stop gracefully (send Ctrl+C to screen session)
 ExecStop=/usr/bin/screen -S fsy-console -X quit

@@ -129,23 +129,37 @@ On first startup, the console will:
 
 For production deployments, you can run the console as a systemd service that automatically starts on boot and runs in a screen session.
 
-### Quick Setup
+### Automated Setup (Recommended)
+
+Use the installation script that automatically configures everything for your system:
 
 ```bash
-# Copy the service file
+# Run the installer (auto-detects user, paths, Python environment)
+./install-service.sh
+```
+
+The installer will:
+- Auto-detect your username and home directory
+- Find your Python virtual environment (onyx-venv, venv, or console-venv)
+- Create a customized service file with correct paths
+- Install to /etc/systemd/system/
+- Optionally enable auto-start and start the service
+
+### Manual Setup
+
+If you need to customize the service configuration:
+
+```bash
+# Edit the template service file
+nano fsy-console.service
+
+# Copy to systemd directory
 sudo cp fsy-console.service /etc/systemd/system/
 
-# Reload systemd
+# Reload and enable
 sudo systemctl daemon-reload
-
-# Enable auto-start on boot
 sudo systemctl enable fsy-console.service
-
-# Start the service now
 sudo systemctl start fsy-console.service
-
-# Check status
-systemctl status fsy-console.service
 ```
 
 ### Accessing the Console
