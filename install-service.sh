@@ -119,16 +119,20 @@ WorkingDirectory=${PROJECT_DIR}
 # Start the console in a screen session
 ExecStart=/usr/bin/screen -dmS ${SERVICE_NAME} ${PYTHON_EXEC} main.py ${EXEC_ARGS}
 
-# Graceful shutdown: SIGTERM is caught and converted to SIGINT internally
-# This works even when screen is detached
+# Graceful shutdown: Find Python process (child of screen) and send SIGTERM
+# Python's SIGTERM handler converts it to SIGINT internally for graceful cleanup
+ExecStop=/bin/bash -c 'PYTHON_PID=\$(pgrep --parent \$MAINPID); [ -n "\$PYTHON_PID" ] && kill -TERM \$PYTHON_PID'
+
+# Don't let systemd send signals - ExecStop handles it
+# This prevents screen from receiving SIGTERM (which causes immediate exit)
+KillMode=none
+
+# Allow 30 seconds for graceful shutdown before SIGKILL
 TimeoutStopSec=30
 
 # Restart on failure
 Restart=on-failure
 RestartSec=10
-
-# Cleanup on stop
-KillMode=process
 
 # Logging
 StandardOutput=journal
