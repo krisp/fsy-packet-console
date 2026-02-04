@@ -1,10 +1,17 @@
-"""
-Command handler infrastructure for FSY Packet Console.
+"""Command handler modules for TNC, APRS, radio, and weather commands."""
 
-This package provides a decorator-based command registration system that
-eliminates boilerplate and enables automatic help generation and tab completion.
-"""
+from .tnc_commands import TNCCommandHandler
+from .beacon_commands import BeaconCommandHandler
+from .weather_commands import WeatherCommandHandler
+from .aprs_console_commands import APRSConsoleCommandHandler
+from .debug_commands import DebugCommandHandler
+from .radio_commands import RadioCommandHandler
 
-from .base import CommandHandler, command
-
-__all__ = ['CommandHandler', 'command']
+__all__ = [
+    'TNCCommandHandler',
+    'BeaconCommandHandler',
+    'WeatherCommandHandler',
+    'APRSConsoleCommandHandler',
+    'DebugCommandHandler',
+    'RadioCommandHandler',
+]

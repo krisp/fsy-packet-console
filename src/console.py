@@ -47,6 +47,7 @@ from src.commands.beacon_commands import BeaconCommandHandler
 from src.commands.weather_commands import WeatherCommandHandler
 from src.commands.aprs_console_commands import APRSConsoleCommandHandler
 from src.commands.debug_commands import DebugCommandHandler
+from src.commands.radio_commands import RadioCommandHandler
 from src.protocol import (
     build_iframe,
     decode_kiss_aprs,
@@ -507,14 +508,6 @@ class TNCConfig:
             "MONITOR": "ON",
             "DEBUGFRAMES": "OFF",
             "TXDELAY": "30",
-            "PERSIST": "63",
-            "SLOTTIME": "10",
-            "TXTAIL": "10",
-            "DUPLEX": "0",
-            "MAXFRAME": "7",
-            "FRACK": "3000",
-            "PACLEN": "128",
-            "USERS": "1",
             "RETRY": "3",
             "RETRY_FAST": "20",  # Fast retry timeout (seconds) for non-digipeated messages
             "RETRY_SLOW": "600",  # Slow retry timeout (seconds) for digipeated but not ACKed - 10 minutes
@@ -1265,6 +1258,66 @@ class CommandCompleter(Completer):
                                 display_meta="Clear all station filters",
                             )
 
+            # PWS (Personal Weather Station) completions
+            elif first_word == "pws":
+                if len(words) == 1 or (
+                    len(words) == 2 and not text.endswith(" ")
+                ):
+                    subcommands_meta = {
+                        "show": "Display current weather data",
+                        "fetch": "Fetch fresh weather data now",
+                        "connect": "Connect to weather station",
+                        "disconnect": "Disconnect from weather station",
+                        "test": "Test connection to weather station",
+                    }
+                    word = words[1] if len(words) == 2 else ""
+                    for subcmd, meta in subcommands_meta.items():
+                        if subcmd.startswith(word.lower()):
+                            yield Completion(
+                                subcmd,
+                                start_position=-len(word),
+                                display=subcmd,
+                                display_meta=meta,
+                            )
+
+            # TNC command completions
+            elif first_word == "tnc":
+                if len(words) == 1 or (
+                    len(words) == 2 and not text.endswith(" ")
+                ):
+                    # TNC-2 configuration commands
+                    subcommands_meta = {
+                        "display": "Show all TNC parameters",
+                        "mycall": "Set your callsign",
+                        "myalias": "Set your alias",
+                        "mylocation": "Set Maidenhead grid square",
+                        "connect": "Connect to station",
+                        "disconnect": "Disconnect current connection",
+                        "conv": "Enter conversation mode",
+                        "unproto": "Set unproto destination",
+                        "monitor": "Enable/disable packet monitoring",
+                        "auto_ack": "Enable/disable auto ACK",
+                        "retry": "Set retry count",
+                        "retry_fast": "Set fast retry timeout",
+                        "retry_slow": "Set slow retry timeout",
+                        "digipeater": "Enable/disable digipeater",
+                        "debug_buffer": "Set debug buffer size",
+                        "status": "Show TNC status",
+                        "reset": "Reset TNC settings",
+                        "hardreset": "Hard reset (factory defaults)",
+                        "powercycle": "Power cycle radio",
+                        "tncsend": "Send raw hex to TNC",
+                    }
+                    word = words[1] if len(words) == 2 else ""
+                    for subcmd, meta in subcommands_meta.items():
+                        if subcmd.startswith(word.lower()):
+                            yield Completion(
+                                subcmd,
+                                start_position=-len(word),
+                                display=subcmd,
+                                display_meta=meta,
+                            )
+
     def _get_command_help(self, cmd):
         """Get brief help text for a command.
 
@@ -1309,6 +1362,7 @@ class CommandCompleter(Completer):
             "station": "Station database",
             "wx": "Weather stations",
             "weather": "Weather stations (alias for wx)",
+            "pws": "Personal Weather Station",
         }
         return help_text.get(cmd, "")
 
@@ -1321,30 +1375,30 @@ class CommandProcessor:
 
         self.commands = {
             "help": self.cmd_help,
-            "status": self.cmd_status,
-            "health": self.cmd_health,
-            "notifications": self.cmd_notifications,
-            "vfo": self.cmd_vfo,
-            "setvfo": self.cmd_setvfo,
-            "active": self.cmd_active,
-            "dual": self.cmd_dual,
-            "scan": self.cmd_scan,
-            "squelch": self.cmd_squelch,
-            "volume": self.cmd_volume,
-            "bss": self.cmd_bss,
-            "setbss": self.cmd_setbss,
-            "poweron": self.cmd_poweron,
-            "poweroff": self.cmd_poweroff,
-            "channel": self.cmd_channel,
-            "list": self.cmd_list,
-            "power": self.cmd_power,
-            "freq": self.cmd_freq,
-            "dump": self.cmd_dump,
-            "debug": self._dispatch_debug_command,  # Uses handler
-            "tncsend": self.cmd_tncsend,
-            "aprs": self._dispatch_aprs_command,  # Uses handler
-            "wx": self.cmd_wx,
-            "scan_ble": self.cmd_scan_ble,
+            "status": self._dispatch_radio_command,  # Uses radio handler
+            "health": self._dispatch_radio_command,  # Uses radio handler
+            "notifications": self._dispatch_radio_command,  # Uses radio handler
+            "vfo": self._dispatch_radio_command,  # Uses radio handler
+            "setvfo": self._dispatch_radio_command,  # Uses radio handler
+            "active": self._dispatch_radio_command,  # Uses radio handler
+            "dual": self._dispatch_radio_command,  # Uses radio handler
+            "scan": self._dispatch_radio_command,  # Uses radio handler
+            "squelch": self._dispatch_radio_command,  # Uses radio handler
+            "volume": self._dispatch_radio_command,  # Uses radio handler
+            "bss": self._dispatch_radio_command,  # Uses radio handler
+            "setbss": self._dispatch_radio_command,  # Uses radio handler
+            "poweron": self._dispatch_radio_command,  # Uses radio handler
+            "poweroff": self._dispatch_radio_command,  # Uses radio handler
+            "channel": self._dispatch_radio_command,  # Uses radio handler
+            "list": self._dispatch_radio_command,  # Uses radio handler
+            "power": self._dispatch_radio_command,  # Uses radio handler
+            "freq": self._dispatch_radio_command,  # Uses radio handler
+            "dump": self._dispatch_radio_command,  # Uses radio handler
+            "debug": self._dispatch_debug_command,  # Uses debug handler
+            "tncsend": self._dispatch_tnc_command,  # Uses TNC handler
+            "aprs": self._dispatch_aprs_command,  # Uses APRS handler
+            "pws": self._dispatch_pws_command,  # Uses weather handler
+            "scan_ble": self._dispatch_radio_command,  # Uses radio handler
             "tnc": self.cmd_tnc,
             "quit": self.cmd_quit,
             "exit": self.cmd_quit,
@@ -1491,6 +1545,7 @@ class CommandProcessor:
         self.weather_handler = WeatherCommandHandler(self)
         self.aprs_console_handler = APRSConsoleCommandHandler(self)
         self.debug_handler = DebugCommandHandler(self)
+        self.radio_handler = RadioCommandHandler(self)
 
     async def _broadcast_mylocation_to_web(self, grid_square: str) -> bool:
         """
@@ -1528,6 +1583,32 @@ class CommandProcessor:
     async def _dispatch_debug_command(self, args):
         """Dispatch DEBUG command to handler."""
         await self.debug_handler.debug(args)
+
+    async def _dispatch_pws_command(self, args):
+        """Dispatch PWS (Personal Weather Station) command to handler."""
+        await self.weather_handler.pws(args)
+
+    async def _dispatch_radio_command(self, args):
+        """Dispatch radio control command to handler."""
+        # Get the command name from the call stack
+        import inspect
+        frame = inspect.currentframe()
+        # Walk up the stack to find the command dispatcher
+        caller_frame = frame.f_back
+        # Get the command being executed from process() method
+        # The command name will be in the local variables of process()
+        while caller_frame:
+            if 'cmd' in caller_frame.f_locals:
+                cmd = caller_frame.f_locals['cmd']
+                break
+            caller_frame = caller_frame.f_back
+
+        # Dispatch to radio handler
+        await self.radio_handler.dispatch(cmd.upper(), args)
+
+    async def _dispatch_tnc_command(self, args):
+        """Dispatch TNCSEND command to TNC handler."""
+        await self.tnc_handler.tncsend(args)
 
     async def process(self, line):
         """Process a command line with mode-aware dispatching."""
@@ -1740,8 +1821,11 @@ class CommandProcessor:
                 print_pt(HTML("  <gray>(Type 'radio' to switch modes for direct access)</gray>"))
                 print_pt("")
 
-            print_pt(HTML("<b>TNC Commands:</b>"))
+            print_pt(HTML("<b>TNC Configuration:</b>"))
             print_pt(HTML("  <b>tnc</b>               - Enter TNC-2 terminal mode"))
+            print_pt(HTML("  <b>tnc display</b>       - Show TNC parameters"))
+            print_pt(HTML("  <b>tnc mycall &lt;call&gt;</b> - Set your callsign"))
+            print_pt(HTML("  <b>tnc monitor &lt;on|off&gt;</b> - Enable/disable monitoring"))
             print_pt("")
 
         elif self.console_mode == "radio":
@@ -1810,17 +1894,18 @@ class CommandProcessor:
             print_pt(HTML("  <gray>(Type 'aprs' to switch modes for direct access)</gray>"))
             print_pt("")
 
-            print_pt(HTML("<b>TNC:</b>"))
-            print_pt(
-                HTML("  <b>tncsend &lt;hex&gt;</b>         - Send raw hex to TNC")
-            )
+            print_pt(HTML("<b>TNC Configuration:</b>"))
             print_pt(HTML("  <b>tnc</b>               - Enter TNC terminal mode"))
+            print_pt(HTML("  <b>tnc display</b>       - Show TNC parameters"))
+            print_pt(HTML("  <b>tnc mycall &lt;call&gt;</b> - Set your callsign"))
+            print_pt(HTML("  <b>tnc tncsend &lt;hex&gt;</b> - Send raw hex to TNC"))
             print_pt("")
 
         # Common commands (both modes)
         print_pt(HTML("<b>Utility:</b>"))
         print_pt(HTML("  <b>dump</b>              - Dump raw settings"))
         print_pt(HTML("  <b>debug</b>             - Toggle debug output"))
+        print_pt(HTML("  <b>pws [show|fetch]</b>  - Personal Weather Station"))
         print_pt(HTML("  <b>help</b>              - Show this help"))
         print_pt(HTML("  <b>quit</b> / <b>exit</b>      - Exit application"))
         print_pt("")
@@ -1834,940 +1919,6 @@ class CommandProcessor:
         print_pt(HTML(f"<b>Web UI:</b> Port {webui_port}"))
         print_pt("")
 
-    async def cmd_health(self, args):
-        """Show connection health."""
-        print_header("Connection Health")
-
-        # Check connection status (BLE mode only)
-        if self.radio.client:
-            connected = self.radio.client.is_connected
-            conn_color = "green" if connected else "red"
-            print_pt(
-                HTML(
-                    f"BLE Connected:     <{conn_color}>{'Yes' if connected else 'No'}</{conn_color}>"
-                )
-            )
-        else:
-            print_pt(HTML("Mode:              <green>Serial KISS TNC</green>"))
-
-        idle_time = int(self.radio.get_tnc_idle_time())
-        idle_color = (
-            "green"
-            if idle_time < 60
-            else "yellow" if idle_time < 300 else "red"
-        )
-        print_pt(
-            HTML(
-                f"TNC Idle Time:     <{idle_color}>{idle_time}s</{idle_color}>"
-            )
-        )
-
-        print_pt(f"TNC Packets RX:    {self.radio.tnc_packet_count}")
-        print_pt(f"Heartbeat Fails:   {self.radio.heartbeat_failures}")
-
-        hb_time = int(
-            (datetime.now() - self.radio.last_heartbeat).total_seconds()
-        )
-        print_pt(f"Last Heartbeat:    {hb_time}s ago")
-
-        print_pt("")
-        print_info("Running health check...")
-        healthy = await self.radio.check_connection_health()
-
-        if healthy:
-            print_info("✓ Connection is healthy")
-        else:
-            print_error("✗ Connection appears unhealthy")
-
-        print_pt("")
-
-    async def cmd_notifications(self, args):
-        """Check notification status."""
-        print_header("Notification Status")
-
-        if not self.radio.client:
-            print_error("Notifications command not available in serial mode")
-            return
-
-        try:
-            # Check if notifications are still enabled
-            services = self.radio.client.services
-
-            for service in services:
-                for char in service.characteristics:
-                    if char.uuid == TNC_RX_UUID:
-                        print_info(f"TNC RX UUID found: {char.uuid}")
-                        print_info(f"  Properties: {char.properties}")
-
-                    if char.uuid == RADIO_INDICATE_UUID:
-                        print_info(f"Radio indicate UUID found: {char.uuid}")
-                        print_info(f"  Properties: {char.properties}")
-
-            print_pt("")
-            print_warning(
-                "If TNC packets have stopped, restart the application"
-            )
-
-        except Exception as e:
-            print_error(f"Failed to check notifications: {e}")
-
-        print_pt("")
-
-
-    async def cmd_dump(self, args):
-        """Dump raw settings bytes for analysis."""
-        print_info("Reading raw settings...")
-        settings = await self.radio.get_settings()
-
-        if settings and "raw_data" in settings:
-            data = settings["raw_data"]
-            print_header("Raw Settings Data")
-
-            # Print hex dump
-            print_pt("Hex dump:")
-            for i in range(0, len(data), 16):
-                chunk = data[i : i + 16]
-                hex_str = " ".join(f"{b:02x}" for b in chunk)
-                ascii_str = "".join(
-                    chr(b) if 32 <= b <= 126 else "." for b in chunk
-                )
-                print_pt(f"  {i:04x}: {hex_str:<48} {ascii_str}")
-
-            print_pt(HTML(f"\n<yellow>Decoded VFO settings:</yellow>"))
-            print_pt(f"  VFO A: Channel {settings['channel_a']}")
-            print_pt(f"  VFO B: Channel {settings['channel_b']}")
-            print_pt(
-                f"  Active VFO: {'A' if settings.get('vfo_x', 0) == 0 else 'B'}"
-            )
-            print_pt("")
-        else:
-            print_error("Failed to read settings")
-
-    async def cmd_status(self, args):
-        """Show radio status."""
-        print_info("Reading status...")
-        status = await self.radio.get_status()
-        settings = await self.radio.get_settings()
-
-        if status:
-            print_header("Radio Status")
-            on_color = "green" if status["is_power_on"] else "red"
-            print_pt(
-                HTML(
-                    f"Power:         <{on_color}>{'ON' if status['is_power_on'] else 'OFF'}</{on_color}>"
-                )
-            )
-
-            tx_color = "red" if status["is_in_tx"] else "gray"
-            print_pt(
-                HTML(
-                    f"TX:            <{tx_color}>{'TRANSMITTING' if status['is_in_tx'] else 'Idle'}</{tx_color}>"
-                )
-            )
-
-            rx_color = "green" if status["is_in_rx"] else "gray"
-            print_pt(
-                HTML(
-                    f"RX:            <{rx_color}>{'RECEIVING' if status['is_in_rx'] else 'Idle'}</{rx_color}>"
-                )
-            )
-
-            scan_color = "yellow" if status["is_scan"] else "gray"
-            print_pt(
-                HTML(
-                    f"Scan:          <{scan_color}>{'Active' if status['is_scan'] else 'Off'}</{scan_color}>"
-                )
-            )
-
-            # Add 1 to channel ID for display (radio uses 0-based internally, displays 1-based)
-            print_pt(f"Channel:       {status['curr_ch_id'] + 1}")
-            print_pt(f"RSSI:          {status['rssi']}/15")
-
-            if settings:
-                # Prefer double_channel for active VFO selection when available
-                mode = settings.get("double_channel", None)
-                if mode is not None and mode in (1, 2):
-                    active_vfo = "A" if mode != 2 else "B"
-                else:
-                    vfo_x = settings.get("vfo_x", 0)
-                    active_vfo = "A" if vfo_x == 0 else "B"
-                print_pt(f"Active VFO:    {active_vfo}")
-
-                dual_mode = settings.get("double_channel", 0)
-                dual_str = (
-                    "Off"
-                    if dual_mode == 0
-                    else "A+B" if dual_mode == 1 else "B+A"
-                )
-                print_pt(f"Dual Watch:    {dual_str}")
-
-            # TNC status
-            idle_time = int(self.radio.get_tnc_idle_time())
-            print_pt(
-                f"TNC Packets:   {self.radio.tnc_packet_count} ({idle_time}s idle)"
-            )
-
-            # TNC Bridge status
-            if self.radio.tnc_bridge:
-                if self.radio.tnc_bridge.client_address:
-                    print_pt(
-                        HTML(
-                            f"TNC Bridge:    <green>Connected ({self.radio.tnc_bridge.client_address})</green>"
-                        )
-                    )
-                else:
-                    print_pt(
-                        HTML(
-                            f"TNC Bridge:    <yellow>Listening on port {TNC_TCP_PORT}</yellow>"
-                        )
-                    )
-
-            print_pt("")
-        else:
-            print_error("Failed to read status")
-
-    async def cmd_vfo(self, args):
-        """Show VFO A/B configuration."""
-        print_info("Reading VFO settings...")
-        settings = await self.radio.get_settings()
-
-        if settings:
-            print_header("VFO Configuration")
-
-            # Determine active VFO: prefer `double_channel` when present,
-            # otherwise fall back to `vfo_x`.
-            mode = settings.get("double_channel", None)
-            if mode is not None and mode in (1, 2):
-                active_vfo = "A" if mode != 2 else "B"
-            else:
-                vfo_x = settings.get("vfo_x", None)
-                active_vfo = "A" if (vfo_x is None or vfo_x == 0) else "B"
-            active_marker_a = "●" if active_vfo == "A" else "○"
-            active_marker_b = "●" if active_vfo == "B" else "○"
-
-            print_pt(
-                HTML(
-                    f"VFO A (Main):  {active_marker_a} Channel {settings['channel_a']}"
-                )
-            )
-            print_pt(
-                HTML(
-                    f"VFO B (Sub):   {active_marker_b} Channel {settings['channel_b']}"
-                )
-            )
-
-            mode = settings.get("double_channel", 0)
-            mode_str = "Off" if mode == 0 else "A+B" if mode == 1 else "B+A"
-            print_pt(f"Dual Watch:    {mode_str}")
-            print_pt(
-                f"Scan:          {'On' if settings.get('scan', False) else 'Off'}"
-            )
-            print_pt(f"Squelch:       {settings.get('squelch_level', 0)}")
-            print_pt("")
-
-            print_info(f"Reading VFO A details (CH{settings['channel_a']})...")
-            ch_a = await self.radio.read_channel(settings["channel_a"])
-            if ch_a:
-                self._print_channel_details(ch_a)
-
-            print_info(f"Reading VFO B details (CH{settings['channel_b']})...")
-            ch_b = await self.radio.read_channel(settings["channel_b"])
-            if ch_b:
-                self._print_channel_details(ch_b)
-        else:
-            print_error("Failed to read VFO settings")
-
-    async def cmd_setvfo(self, args):
-        """Set VFO to a specific channel."""
-        if len(args) < 2:
-            print_error("Usage: setvfo &lt;a|b&gt; &lt;channel&gt;")
-            print_error("Channel must be 1-256")
-            return
-
-        vfo = args[0].lower()
-        if vfo not in ["a", "b"]:
-            print_error("VFO must be 'a' or 'b'")
-            return
-
-        try:
-            channel_id = int(args[1])
-        except ValueError:
-            print_error("Channel ID must be a number")
-            return
-
-        if channel_id < 1 or channel_id > 256:
-            print_error("Channel ID must be 1-256")
-            return
-
-        print_info(f"Setting VFO {vfo.upper()} to channel {channel_id}...")
-        success = await self.radio.set_vfo(vfo, channel_id)
-
-        if success:
-            print_info(f"✓ VFO {vfo.upper()} set to channel {channel_id}")
-
-            channel = await self.radio.read_channel(channel_id)
-            if channel:
-                print_pt(
-                    f"  {channel['name']}: {channel['tx_freq_mhz']:.4f} MHz"
-                )
-
-            await asyncio.sleep(0.3)
-            settings = await self.radio.get_settings()
-            if settings:
-                actual_a = settings["channel_a"]
-                actual_b = settings["channel_b"]
-                print_info(f"Verified: VFO A={actual_a}, VFO B={actual_b}")
-        else:
-            print_error(f"Failed to set VFO {vfo.upper()}")
-
-    async def cmd_active(self, args):
-        """Switch active VFO."""
-        if not args:
-            print_error("Usage: active &lt;a|b&gt;")
-            return
-
-        vfo = args[0].lower()
-        if vfo not in ["a", "b"]:
-            print_error("VFO must be 'a' or 'b'")
-            return
-
-        print_info(f"Switching to VFO {vfo.upper()}...")
-        success = await self.radio.set_active_vfo(vfo)
-
-        if success:
-            print_info(f"✓ Active VFO set to {vfo.upper()}")
-        else:
-            print_error("Failed to switch VFO")
-
-    async def cmd_dual(self, args):
-        """Set dual watch mode."""
-        if not args:
-            print_error("Usage: dual &lt;off|ab|ba&gt;")
-            return
-
-        mode_str = args[0].lower()
-        if mode_str == "off":
-            mode = 0
-        elif mode_str == "ab":
-            mode = 1
-        elif mode_str == "ba":
-            mode = 2
-        else:
-            print_error("Mode must be: off, ab, or ba")
-            return
-
-        print_info(f"Setting dual watch to {mode_str.upper()}...")
-        success = await self.radio.set_dual_watch(mode)
-
-        if success:
-            print_info(f"✓ Dual watch set to {mode_str.upper()}")
-        else:
-            print_error("Failed to set dual watch")
-
-    async def cmd_scan(self, args):
-        """Enable/disable scanning."""
-        if not args:
-            print_error("Usage: scan &lt;on|off&gt;")
-            return
-
-        state = args[0].lower()
-        if state == "on":
-            enabled = True
-        elif state == "off":
-            enabled = False
-        else:
-            print_error("State must be: on or off")
-            return
-
-        print_info(f"Setting scan to {state.upper()}...")
-        success = await self.radio.set_scan(enabled)
-
-        if success:
-            print_info(f"✓ Scan {state.upper()}")
-        else:
-            print_error("Failed to set scan")
-
-    async def cmd_squelch(self, args):
-        """Set squelch level."""
-        if not args:
-            print_error("Usage: squelch &lt;0-15&gt;")
-            return
-
-        try:
-            level = int(args[0])
-        except ValueError:
-            print_error("Level must be a number 0-15")
-            return
-
-        if level < 0 or level > 15:
-            print_error("Level must be 0-15")
-            return
-
-        print_info(f"Setting squelch to {level}...")
-        success = await self.radio.set_squelch(level)
-
-        if success:
-            print_info(f"✓ Squelch set to {level}")
-        else:
-            print_error("Failed to set squelch")
-
-    async def cmd_volume(self, args):
-        """Get or set volume."""
-        if not args:
-            # Get volume
-            print_info("Reading volume...")
-            level = await self.radio.get_volume()
-            if level is not None:
-                print_info(f"Volume: {level}/15")
-            else:
-                print_error("Failed to read volume")
-            return
-
-        # Set volume
-        try:
-            level = int(args[0])
-        except ValueError:
-            print_error("Level must be a number 0-15")
-            return
-
-        if level < 0 or level > 15:
-            print_error("Level must be 0-15")
-            return
-
-        print_info(f"Setting volume to {level}...")
-        success = await self.radio.set_volume(level)
-
-        if success:
-            print_info(f"✓ Volume set to {level}")
-        else:
-            print_error("Failed to set volume")
-
-    async def cmd_bss(self, args):
-        """Show BSS/APRS settings."""
-        print_info("Reading BSS settings...")
-        bss = await self.radio.get_bss_settings()
-
-        print_debug(f"cmd_bss: received bss = {bss}", level=6)
-
-        if bss:
-            print_header("BSS/APRS Settings")
-            print_pt(f"APRS Callsign:     {bss['aprs_callsign']}")
-            print_pt(f"APRS SSID:         {bss['aprs_ssid']}")
-            print_pt(f"APRS Symbol:       {bss['aprs_symbol']}")
-            print_pt(f"Beacon Message:    {bss['beacon_message']}")
-            print_pt(
-                f"Share Location:    {'Yes' if bss['should_share_location'] else 'No'}"
-            )
-            print_pt(f"Share Interval:    {bss['location_share_interval']}s")
-            print_pt(f"PTT Release ID:    {bss['ptt_release_id_info']}")
-            print_pt(f"Max Fwd Times:     {bss['max_fwd_times']}")
-            print_pt(f"Time To Live:      {bss['time_to_live']}")
-            print_pt("")
-        else:
-            print_error("Failed to read BSS settings")
-
-    async def cmd_setbss(self, args):
-        """Set BSS parameter."""
-        if len(args) < 2:
-            print_error("Usage: setbss &lt;param&gt; &lt;value&gt;")
-            print_error("Parameters: callsign, ssid, symbol, beacon, interval")
-            return
-
-        param = args[0].lower()
-        value = " ".join(args[1:])
-
-        bss = await self.radio.get_bss_settings()
-        if not bss:
-            print_error("Failed to read BSS settings")
-            return
-
-        try:
-            if param == "callsign":
-                bss["aprs_callsign"] = value.upper()[:6]
-            elif param == "ssid":
-                bss["aprs_ssid"] = int(value) & 0x0F
-            elif param == "symbol":
-                bss["aprs_symbol"] = value[:2]
-            elif param == "beacon":
-                bss["beacon_message"] = value[:18]
-            elif param == "interval":
-                bss["location_share_interval"] = int(value)
-            else:
-                print_error(f"Unknown parameter: {param}")
-                return
-
-            print_info(f"Setting {param} to {value}...")
-            success = await self.radio.write_bss_settings(bss)
-
-            if success:
-                print_info(f"✓ BSS {param} updated")
-            else:
-                print_error("Failed to update BSS settings")
-
-        except ValueError as e:
-            print_error(f"Invalid value: {e}")
-
-    async def cmd_channel(self, args):
-        """Show channel details."""
-        if not args:
-            print_error("Usage: channel &lt;id&gt;")
-            return
-
-        try:
-            channel_id = int(args[0])
-        except ValueError:
-            print_error("Channel ID must be a number")
-            return
-
-        print_info(f"Reading channel {channel_id}...")
-        channel = await self.radio.read_channel(channel_id)
-
-        if channel:
-            self._print_channel_details(channel)
-        else:
-            print_error(f"Failed to read channel {channel_id}")
-
-    async def cmd_list(self, args):
-        """List channels in table format."""
-        if len(args) == 0:
-            start = 1
-            end = 30
-        elif len(args) == 1:
-            start = int(args[0])
-            end = start + 9
-        elif len(args) >= 2:
-            start = int(args[0])
-            end = int(args[1])
-
-        start = max(1, min(start, 256))
-        end = max(1, min(end, 256))
-
-        if start > end:
-            print_error("Start channel must be &lt;= end channel")
-            return
-
-        print_header(f"Channel List ({start}-{end})")
-
-        widths = [4, 12, 12, 12, 8, 8, 5]
-        print_table_row(
-            [
-                "CH",
-                "Name",
-                "TX (MHz)",
-                "RX (MHz)",
-                "TX Tone",
-                "RX Tone",
-                "Power",
-            ],
-            widths,
-            header=True,
-        )
-
-        for ch_id in range(start, end + 1):
-            channel = await self.radio.read_channel(ch_id)
-
-            if channel:
-                print_table_row(
-                    [
-                        ch_id,
-                        channel["name"][:12],
-                        f"{channel['tx_freq_mhz']:.4f}",
-                        f"{channel['rx_freq_mhz']:.4f}",
-                        channel["tx_tone"][:8],
-                        channel["rx_tone"][:8],
-                        channel["power"],
-                    ],
-                    widths,
-                )
-            else:
-                print_table_row(
-                    [ch_id, "---", "---", "---", "---", "---", "---"], widths
-                )
-
-            await asyncio.sleep(0.05)
-
-        print_pt("")
-
-    async def cmd_power(self, args):
-        """Set power level."""
-        if len(args) < 2:
-            print_error("Usage: power &lt;channel&gt; &lt;level&gt;")
-            return
-
-        try:
-            channel_id = int(args[0])
-        except ValueError:
-            print_error("Channel ID must be a number")
-            return
-
-        power_level = args[1].lower()
-        if power_level not in ["low", "med", "medium", "high", "max"]:
-            print_error("Power level must be: low, med, or high")
-            return
-
-        print_info(f"Setting channel {channel_id} to {power_level} power...")
-        success = await self.radio.set_channel_power(channel_id, power_level)
-
-        if success:
-            print_info(f"✓ Channel {channel_id} power set to {power_level}")
-        else:
-            print_error(f"Failed to set power for channel {channel_id}")
-
-    async def cmd_freq(self, args):
-        """Set frequency."""
-        if len(args) < 3:
-            print_error(
-                "Usage: freq &lt;channel&gt; &lt;tx_mhz&gt; &lt;rx_mhz&gt;"
-            )
-            return
-
-        try:
-            channel_id = int(args[0])
-            tx_freq = float(args[1])
-            rx_freq = float(args[2])
-        except ValueError:
-            print_error("Invalid frequency values")
-            return
-
-        print_info(f"Reading channel {channel_id}...")
-        channel = await self.radio.read_channel(channel_id)
-
-        if not channel:
-            print_error(f"Failed to read channel {channel_id}")
-            return
-
-        channel["tx_freq_mhz"] = tx_freq
-        channel["rx_freq_mhz"] = rx_freq
-
-        print_info(f"Writing new frequencies to channel {channel_id}...")
-        success = await self.radio.write_channel(channel)
-
-        if success:
-            print_info(
-                f"✓ Channel {channel_id} updated: TX={tx_freq} MHz, RX={rx_freq} MHz"
-            )
-        else:
-            print_error(f"Failed to update channel {channel_id}")
-
-    async def cmd_tncsend(self, args):
-        """Send raw hex data to TNC."""
-        if not args:
-            print_error("Usage: tncsend &lt;hexdata&gt;")
-            print_error("Example: tncsend c000c0")
-            return
-
-        hex_str = "".join(args).replace(" ", "")
-
-        try:
-            data = bytes.fromhex(hex_str)
-        except ValueError:
-            print_error("Invalid hex data")
-            print_error(f"Unknown APRS subcommand: {subcmd}")
-            print_error(
-                "Valid subcommands: message, wx, position, station, database"
-            )
-            print_error("Use 'aprs' with no arguments to see help")
-
-    async def _send_aprs_message(self, to_call: str, message: str):
-        """Send an APRS message.
-
-        Args:
-            to_call: Destination callsign
-            message: Message text
-        """
-        # Validate callsign format
-        if "-" in to_call:
-            call_base, ssid = to_call.split("-", 1)
-            if len(call_base) > 6 or not call_base.isalnum():
-                print_error("Invalid callsign format")
-                return
-            try:
-                ssid_num = int(ssid)
-                if ssid_num < 0 or ssid_num > 15:
-                    print_error("SSID must be 0-15")
-                    return
-            except ValueError:
-                print_error("Invalid SSID")
-                return
-        else:
-            if len(to_call) > 6 or not to_call.isalnum():
-                print_error("Invalid callsign format")
-                return
-
-        # Format as APRS message: :CALLSIGN :message text{msgid
-        # Destination callsign must be exactly 9 characters (right-padded with spaces)
-        padded_to = to_call.upper().ljust(9)
-
-        # Generate simple message ID (1-5 chars) - use last 5 digits of timestamp
-
-        msg_id = str(int(time.time() * 1000))[-5:]
-
-        # Build APRS message format
-        aprs_message = f":{padded_to}:{message}{{{msg_id}"
-
-        print_debug(
-            f"APRS message format: recipient='{to_call}' padded='{padded_to}' msgid={msg_id}",
-            level=5,
-        )
-        print_debug(f"APRS info field: '{aprs_message}'", level=5)
-
-        print_info(f"Sending APRS message to {to_call}: {message}")
-
-        # Track sent message for ACK monitoring BEFORE sending
-        # This prevents race condition if ACK arrives very quickly
-        self.aprs_manager.add_sent_message(to_call, message, msg_id)
-
-        # Send with our callsign as source, to APRS as destination
-        print_debug(
-            f"Calling send_aprs: from_call={self.aprs_manager.my_callsign}, to_call=APRS",
-            level=5,
-        )
-        await self.radio.send_aprs(
-            self.aprs_manager.my_callsign, aprs_message, to_call="APRS"
-        )
-
-        print_info("✓ APRS packet sent")
-
-    async def _send_aprs_ack(self, to_call: str, acked_msg_id: str):
-        """Send an APRS ACK message with retry tracking.
-
-        Args:
-            to_call: Destination callsign (who sent the original message)
-            acked_msg_id: The message ID we're acknowledging
-        """
-        # Format ACK: :SENDER___:ack{msgid}
-        # Sender callsign must be exactly 9 characters (left-padded with spaces)
-        padded_to = to_call.ljust(9)
-        ack_message = f"ack{acked_msg_id}"
-        ack_info = f":{padded_to}:{ack_message}"
-
-        print_debug(
-            f"Sending ACK to {to_call} for message ID '{acked_msg_id}'",
-            level=5
-        )
-
-        # Track sent ACK for retry monitoring BEFORE sending
-        # ACKs don't have their own message IDs (prevents ACK loops)
-        # We mark them as "ack" messages by using the full ack text as the message
-        self.aprs_manager.add_sent_message(to_call, ack_message, message_id=None)
-
-        # Send ACK back to sender
-        await self.radio.send_aprs(
-            self.aprs_manager.my_callsign,
-            ack_info,
-            to_call="APRS"
-        )
-
-        print_debug(f"✓ ACK sent to {to_call}", level=5)
-
-    async def cmd_wx(self, args):
-        """Weather station commands.
-
-        Usage:
-            wx                  - Show weather station status
-            wx show             - Show current weather data
-            wx fetch            - Fetch fresh weather data now
-            wx connect          - Connect to weather station
-            wx disconnect       - Disconnect from weather station
-            wx test             - Test connection to weather station
-        """
-        if not hasattr(self, 'weather_manager'):
-            print_error("Weather station not available")
-            return
-
-        if not args:
-            # Show status
-            status = self.weather_manager.get_status()
-
-            print_header("Weather Station Status")
-            print_pt(f"Enabled: {status['enabled']}")
-            print_pt(f"Configured: {status['configured']}")
-            print_pt(f"Connected: {status['connected']}")
-
-            if status['backend']:
-                print_pt(f"Backend: {status['backend']}")
-            if status['address']:
-                print_pt(f"Address: {status['address']}")
-            if status['port']:
-                print_pt(f"Port: {status['port']}")
-
-            print_pt(f"Update Interval: {status['update_interval']}s")
-
-            if status['last_update']:
-                print_pt(f"Last Update: {status['last_update']}")
-
-            if status['has_data']:
-                print_pt("\nUse 'wx show' to see current weather data")
-
-            if not status['configured']:
-                print_pt("\nConfiguration:")
-                print_pt("  WX_BACKEND <ecowitt|davis|...>")
-                print_pt("  WX_ADDRESS <IP or serial port>")
-                print_pt("  WX_ENABLE ON")
-
-            return
-
-        subcmd = args[0].lower()
-
-        if subcmd == "show":
-            # Show current weather
-            data = self.weather_manager.get_cached_weather()
-            if not data:
-                print_error("No weather data available")
-                print_info("Use 'wx fetch' to get fresh data")
-                return
-
-            print_header("Current Weather")
-
-            if data.temperature_outdoor is not None:
-                print_pt(f"Outdoor Temperature: {data.temperature_outdoor:.1f}°F")
-            if data.temperature_indoor is not None:
-                print_pt(f"Indoor Temperature: {data.temperature_indoor:.1f}°F")
-            if data.dew_point is not None:
-                print_pt(f"Dew Point: {data.dew_point:.1f}°F")
-
-            if data.humidity_outdoor is not None:
-                print_pt(f"Outdoor Humidity: {data.humidity_outdoor}%")
-
-            if data.pressure_relative is not None:
-                print_pt(f"Pressure: {data.pressure_relative:.2f} mb")
-
-            if data.wind_speed is not None:
-                print_pt(f"Wind: {data.wind_speed:.1f} mph @ {data.wind_direction}°")
-            if data.wind_gust is not None:
-                print_pt(f"Gust: {data.wind_gust:.1f} mph")
-
-            if data.rain_daily is not None:
-                print_pt(f"Rain (24h): {data.rain_daily:.2f} in")
-
-            print_pt(f"\nLast updated: {data.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
-
-        elif subcmd == "fetch":
-            # Fetch fresh data
-            print_info("Fetching weather data...")
-            data = await self.weather_manager.get_current_weather()
-
-            if not data:
-                print_error("Failed to fetch weather data")
-                return
-
-            print_info("✓ Weather data updated")
-            # Show the data
-            await self.cmd_wx(["show"])
-
-        elif subcmd == "connect":
-            # Connect to weather station
-            success = await self.weather_manager.connect()
-            if not success:
-                print_error("Failed to connect to weather station")
-
-        elif subcmd == "disconnect":
-            # Disconnect from weather station
-            await self.weather_manager.disconnect()
-
-        elif subcmd == "test":
-            # Test connection
-            print_info("Testing connection...")
-            if not self.weather_manager._station:
-                print_error("Not connected to weather station")
-                print_info("Use 'wx connect' first")
-                return
-
-            success = await self.weather_manager._station.test_connection()
-            if success:
-                print_info("✓ Connection test passed")
-            else:
-                print_error("Connection test failed")
-
-        else:
-            print_error(f"Unknown wx command: {subcmd}")
-            print_info("Use 'wx' with no args to see status")
-
-    async def cmd_scan_ble(self, args):
-        """Scan all BLE characteristics to find audio channels."""
-        print_header("BLE Characteristics Scan")
-
-        if not self.radio.client:
-            print_error("BLE scan not available in serial mode")
-            return
-
-        try:
-            services = self.radio.client.services
-
-            for service in services:
-                print_pt(HTML(f"\n<b>Service:</b> {service.uuid}"))
-                print_pt(f"  Handle: {service.handle}")
-
-                for char in service.characteristics:
-                    props = ", ".join(char.properties)
-                    print_pt(
-                        HTML(
-                            f"\n  <yellow>Characteristic:</yellow> {char.uuid}"
-                        )
-                    )
-                    print_pt(f"    Handle: {char.handle}")
-                    print_pt(f"    Properties: {props}")
-
-                    # Check if this is a known UUID
-                    if char.uuid == RADIO_WRITE_UUID:
-                        print_pt(
-                            HTML("    <green>→ RADIO_WRITE (commands)</green>")
-                        )
-                    elif char.uuid == RADIO_INDICATE_UUID:
-                        print_pt(
-                            HTML(
-                                "    <green>→ RADIO_INDICATE (responses)</green>"
-                            )
-                        )
-                    elif char.uuid == TNC_TX_UUID:
-                        print_pt(
-                            HTML("    <green>→ TNC_TX (TNC transmit)</green>")
-                        )
-                    elif char.uuid == TNC_RX_UUID:
-                        print_pt(
-                            HTML("    <green>→ TNC_RX (TNC receive)</green>")
-                        )
-                    elif (
-                        "notify" in char.properties
-                        or "indicate" in char.properties
-                    ):
-                        print_pt(
-                            HTML(
-                                "    <cyan>→ Potential audio/data stream</cyan>"
-                            )
-                        )
-
-                    # Show descriptors
-                    if char.descriptors:
-                        for desc in char.descriptors:
-                            print_pt(f"      Descriptor: {desc.uuid}")
-
-            print_pt("")
-            print_info(
-                "Look for characteristics with 'notify' property for audio streams"
-            )
-            print_pt("")
-
-        except Exception as e:
-            print_error(f"Failed to scan characteristics: {e}")
-
-    async def cmd_poweron(self, args):
-        """Power on the radio."""
-        print_info("Powering on radio...")
-        success = await self.radio.set_hardware_power(True)
-        if success:
-            print_info("✓ Radio powered on")
-        else:
-            print_error("Failed to power on radio")
-
-    async def cmd_poweroff(self, args):
-        """Power off the radio."""
-        print_info("Powering off radio...")
-        success = await self.radio.set_hardware_power(False)
-        if success:
-            print_info("✓ Radio powered off")
-        else:
-            print_error("Failed to power off radio")
 
     async def cmd_quit(self, args):
         """Quit the application."""
@@ -2779,8 +1930,23 @@ class CommandProcessor:
         self.radio.running = False
 
     async def cmd_tnc(self, args, auto_connect=None):
-        """Enter TNC terminal mode."""
+        """TNC commands and terminal mode.
 
+        Usage:
+            tnc                     - Enter TNC terminal mode
+            tnc <command> [args]    - Execute TNC command from any mode
+
+        Examples:
+            tnc display             - Show TNC parameters
+            tnc mycall N0CALL       - Set your callsign
+            tnc monitor on          - Enable packet monitoring
+        """
+        # If args provided, dispatch to TNC handler for command execution
+        if args:
+            await self.tnc_handler.dispatch(args[0].upper(), args[1:])
+            return
+
+        # No args - enter TNC terminal mode
         print_header("TNC Terminal Mode")
         print_pt(
             HTML(
@@ -3491,24 +2657,6 @@ class CommandProcessor:
             print_pt(
                 HTML(f"<b>N(S)/N(R):</b> {self.ax25._ns}/{self.ax25._nr}")
             )
-
-    def _print_channel_details(self, channel):
-        """Print channel details."""
-        print_pt(
-            HTML(
-                f"\n<b>Channel {channel['channel_id']}: {channel['name']}</b>"
-            )
-        )
-        print_pt(f"  TX:        {channel['tx_freq_mhz']:.6f} MHz")
-        print_pt(f"  RX:        {channel['rx_freq_mhz']:.6f} MHz")
-        print_pt(f"  TX Tone:   {channel['tx_tone']}")
-        print_pt(f"  RX Tone:   {channel['rx_tone']}")
-        print_pt(f"  Power:     {channel['power']}")
-        print_pt(
-            f"  Bandwidth: {'Wide' if channel['bandwidth'] else 'Narrow'}"
-        )
-        print_pt(f"  Scan:      {'Yes' if channel['scan'] else 'No'}")
-        print_pt("")
 
     async def gps_poll_and_beacon_task(self):
         """Background task to poll GPS and send beacons when enabled."""
@@ -4802,7 +3950,8 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
         # Create digipeater (read state from TNC config)
         digipeat_value = tnc_config.get("DIGIPEAT") or ""
         digipeat_enabled = digipeat_value.upper() == "ON"
-        radio.digipeater = Digipeater(mycall, enabled=digipeat_enabled)
+        myalias = tnc_config.get("MYALIAS") or ""
+        radio.digipeater = Digipeater(mycall, my_alias=myalias, enabled=digipeat_enabled)
 
         # Only start TNC/AGWPE bridges if NOT in TCP client mode
         # (TCP mode acts as client to external TNC, not a server for other apps)

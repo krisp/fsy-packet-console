@@ -721,10 +721,20 @@ aprs> weather KB1ABC                   # Weather data for station
 The console has multiple modes depending on your hardware:
 
 - **`aprs>`** - APRS mode for messaging, tracking, beaconing (always available)
-- **`tnc>`** - TNC mode for AX.25 connected mode AND TNC-2 configuration (always available)
+- **`tnc>`** - TNC terminal mode for AX.25 connected mode (packet BBS/nodes)
 - **`radio>`** - Radio control mode for frequency/VFO/power settings (BLE mode only)
 
-**Important:** TNC-2 configuration commands (`mycall`, `beacon`, `txdelay`, etc.) are **ONLY available in TNC mode** (`tnc>` prompt).
+**NEW:** Commands can now be prefixed to work from any mode:
+- `aprs <command>` - APRS operations (messaging, stations, weather)
+- `radio <command>` - Radio control (vfo, channels, power)
+- `tnc <command>` - TNC-2 configuration (mycall, monitor, digipeater)
+
+**Examples:**
+```bash
+aprs> tnc display           # View TNC parameters from APRS mode
+aprs> tnc mycall N0CALL     # Set callsign from APRS mode
+radio> aprs message read    # Read messages from radio mode
+```
 
 ### Connect to Packet BBS
 
@@ -742,9 +752,31 @@ tnc> aprs                             # Return to APRS mode (or 'radio' for radi
 ### Enable Digipeater
 
 ```bash
-aprs> digipeat on                     # Enable WIDEn-N digipeating
-aprs> digipeat off                    # Disable (direct-only mode)
+aprs> tnc digipeater on               # Enable WIDEn-N digipeating
+aprs> tnc myalias WIDE1               # Set digipeater alias
+aprs> tnc digipeater off              # Disable digipeating
 ```
+
+**Note:** MYALIAS allows your digipeater to respond to generic aliases (WIDE1, GATE, RELAY) in addition to your callsign. Supports both exact match and SSID matching (WIDE1 matches WIDE1-1, WIDE1-2, etc.)
+
+### Personal Weather Station
+
+Connect local weather hardware (Ecowitt, Davis, etc.) for APRS weather beaconing:
+
+```bash
+aprs> pws                             # Show PWS status
+aprs> pws show                        # Display current weather
+aprs> pws fetch                       # Fetch fresh data
+aprs> pws connect                     # Connect to station
+
+# Configuration (in TNC mode or with prefix)
+tnc> wx_enable on                     # Enable weather integration
+tnc> wx_backend ecowitt               # Set backend type
+tnc> wx_address 192.168.1.100         # Weather station IP
+tnc> wx_interval 300                  # Update interval (seconds)
+```
+
+**Note:** `pws` controls YOUR local weather station. Use `aprs wx list` to view remote weather stations heard over RF.
 
 ### Debugging
 

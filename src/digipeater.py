@@ -13,16 +13,56 @@ import src.constants as constants
 class Digipeater:
     """APRS digipeater following new-paradigm WIDEn-N rules."""
 
-    def __init__(self, my_callsign: str, enabled: bool = False):
+    def __init__(self, my_callsign: str, my_alias: str = "", enabled: bool = False):
         """Initialize digipeater.
 
         Args:
             my_callsign: Our callsign (e.g., "K1FSY-9")
+            my_alias: Our alias (e.g., "WIDE1", "GATE", "RELAY")
             enabled: Whether digipeating is enabled
         """
         self.my_callsign = my_callsign.upper()
+        self.my_alias = my_alias.upper() if my_alias else None
         self.enabled = enabled
         self.packets_digipeated = 0
+
+    def _matches_my_calls(self, digi_call: str) -> bool:
+        """Check if digipeater call matches our MYCALL or MYALIAS.
+
+        Args:
+            digi_call: Digipeater callsign to check (e.g., "WIDE1-1", "K1FSY-9")
+
+        Returns:
+            True if matches our callsign or alias
+
+        Examples:
+            MYCALL=K1FSY-9, MYALIAS=WIDE1
+            - "K1FSY-9" → True (exact MYCALL match)
+            - "WIDE1" → True (exact MYALIAS match)
+            - "WIDE1-1" → True (MYALIAS with SSID)
+            - "WIDE2-1" → False (different alias)
+        """
+        digi_upper = digi_call.upper()
+
+        # Check exact MYCALL match
+        if digi_upper == self.my_callsign:
+            return True
+
+        # No alias configured
+        if not self.my_alias:
+            return False
+
+        # Check exact MYALIAS match
+        if digi_upper == self.my_alias:
+            return True
+
+        # Check MYALIAS with SSID (e.g., WIDE1 matches WIDE1-1)
+        if '-' in digi_upper:
+            base_call = digi_upper.split('-')[0]
+            if base_call == self.my_alias:
+                return True
+
+        return False
 
     def should_digipeat(
         self,
@@ -90,8 +130,8 @@ class Digipeater:
                 has_viable_hop = True
                 break
 
-            # Check for our callsign in path
-            if digi_clean == self.my_callsign:
+            # Check for our callsign or alias in path
+            if self._matches_my_calls(digi_clean):
                 has_viable_hop = True
                 break
 
@@ -152,10 +192,10 @@ class Digipeater:
                 except ValueError:
                     pass
 
-            # Process our exact callsign
-            if digi_clean == self.my_callsign and not filled:
+            # Process our callsign or alias
+            if self._matches_my_calls(digi_clean) and not filled:
                 new_path.append(f"{self.my_callsign}*")
-                used_alias = self.my_callsign
+                used_alias = digi_clean  # Track what triggered it (could be MYCALL or MYALIAS)
                 filled = True
                 continue
 

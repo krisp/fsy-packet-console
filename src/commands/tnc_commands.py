@@ -86,13 +86,35 @@ class TNCCommandHandler(CommandHandler):
              usage="MYALIAS [alias]",
              category="config")
     async def myalias(self, args):
-        """Display or set station alias."""
+        """Display or set station alias for digipeating.
+
+        MYALIAS allows your digipeater to respond to a generic alias in addition
+        to your callsign. Common aliases: WIDE1, GATE, RELAY.
+
+        When DIGIPEATER is ON, packets with MYALIAS in the path will be digipeated.
+        Supports both exact match (WIDE1) and with SSID (WIDE1-1).
+
+        Examples:
+            MYALIAS WIDE1     - Respond to WIDE1 or WIDE1-1 in path
+            MYALIAS GATE      - Act as a gateway digipeater
+            MYALIAS           - Display current alias
+        """
         if not args:
-            print_pt(f"MYALIAS: {self.tnc_config.get('MYALIAS')}")
+            alias = self.tnc_config.get('MYALIAS')
+            print_pt(f"MYALIAS: {alias if alias else '(none)'}")
+            if alias:
+                print_pt("")
+                print_pt("When DIGIPEATER is ON, will respond to:")
+                print_pt(f"  - {self.tnc_config.get('MYCALL')} (your callsign)")
+                print_pt(f"  - {alias} (your alias)")
+                print_pt(f"  - {alias}-N (alias with any SSID)")
             return
+
         alias = args[0].upper()
         self.tnc_config.set("MYALIAS", alias)
         print_info(f"MYALIAS set to {alias}")
+        print_pt("")
+        print_pt("Note: Restart required for digipeater to use new alias")
 
     @command("MYLOCATION",
              help_text="Display or set Maidenhead grid square",
@@ -453,6 +475,29 @@ class TNCCommandHandler(CommandHandler):
             print_info("Power cycle complete - TNC should be fully reset")
         except Exception as e:
             print_error(f"Power cycle failed: {e}")
+
+    @command("TNCSEND",
+             help_text="Send raw hex data to TNC",
+             usage="TNCSEND <hexdata>",
+             category="tnc")
+    async def tncsend(self, args):
+        """Send raw hex data to TNC."""
+        if not args:
+            print_error("Usage: tncsend <hexdata>")
+            print_error("Example: tncsend c000c0")
+            return
+
+        hex_str = "".join(args).replace(" ", "")
+
+        try:
+            data = bytes.fromhex(hex_str)
+        except ValueError:
+            print_error("Invalid hex data")
+            return
+
+        print_info(f"Sending {len(data)} bytes to TNC...")
+        await self.cmd_processor.radio.send_tnc_data(data)
+        print_info(f"✓ Sent: {data.hex()}")
 
     @command("EXIT", "QUIT",
              help_text="Exit TNC mode",

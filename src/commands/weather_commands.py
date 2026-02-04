@@ -184,3 +184,136 @@ class WeatherCommandHandler(CommandHandler):
             print_pt("Note: This affects Zambretti forecasts for all weather stations")
         except ValueError:
             print_error("WXTREND must be a number (e.g., 0.3)")
+
+    @command("PWS",
+             help_text="Personal Weather Station operations",
+             usage="PWS [show|fetch|connect|disconnect|test]",
+             category="weather")
+    async def pws(self, args):
+        """
+        Personal Weather Station commands.
+
+        Usage:
+            pws                  - Show weather station status
+            pws show             - Show current weather data
+            pws fetch            - Fetch fresh weather data now
+            pws connect          - Connect to weather station
+            pws disconnect       - Disconnect from weather station
+            pws test             - Test connection to weather station
+
+        Note: This controls YOUR local weather station hardware.
+              Use 'aprs wx' to view remote APRS weather stations.
+        """
+        if not hasattr(self.cmd_processor, 'weather_manager'):
+            print_error("Weather station not available")
+            return
+
+        if not args:
+            # Show status
+            status = self.weather_manager.get_status()
+
+            from src.utils import print_header
+            print_header("Personal Weather Station Status")
+            print_pt(f"Enabled: {status['enabled']}")
+            print_pt(f"Configured: {status['configured']}")
+            print_pt(f"Connected: {status['connected']}")
+
+            if status['backend']:
+                print_pt(f"Backend: {status['backend']}")
+            if status['address']:
+                print_pt(f"Address: {status['address']}")
+            if status['port']:
+                print_pt(f"Port: {status['port']}")
+
+            print_pt(f"Update Interval: {status['update_interval']}s")
+
+            if status['last_update']:
+                print_pt(f"Last Update: {status['last_update']}")
+
+            if status['has_data']:
+                print_pt("\nUse 'pws show' to see current weather data")
+
+            if not status['configured']:
+                print_pt("\nConfiguration:")
+                print_pt("  WX_BACKEND <ecowitt|davis|...>")
+                print_pt("  WX_ADDRESS <IP or serial port>")
+                print_pt("  WX_ENABLE ON")
+
+            return
+
+        subcmd = args[0].lower()
+
+        if subcmd == "show":
+            # Show current weather
+            data = self.weather_manager.get_cached_weather()
+            if not data:
+                print_error("No weather data available")
+                print_info("Use 'pws fetch' to get fresh data")
+                return
+
+            from src.utils import print_header
+            print_header("Current Weather")
+
+            if data.temperature_outdoor is not None:
+                print_pt(f"Outdoor Temperature: {data.temperature_outdoor:.1f}°F")
+            if data.temperature_indoor is not None:
+                print_pt(f"Indoor Temperature: {data.temperature_indoor:.1f}°F")
+            if data.dew_point is not None:
+                print_pt(f"Dew Point: {data.dew_point:.1f}°F")
+
+            if data.humidity_outdoor is not None:
+                print_pt(f"Outdoor Humidity: {data.humidity_outdoor}%")
+
+            if data.pressure_relative is not None:
+                print_pt(f"Pressure: {data.pressure_relative:.2f} mb")
+
+            if data.wind_speed is not None:
+                print_pt(f"Wind: {data.wind_speed:.1f} mph @ {data.wind_direction}°")
+            if data.wind_gust is not None:
+                print_pt(f"Gust: {data.wind_gust:.1f} mph")
+
+            if data.rain_daily is not None:
+                print_pt(f"Rain (24h): {data.rain_daily:.2f} in")
+
+            print_pt(f"\nLast updated: {data.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+
+        elif subcmd == "fetch":
+            # Fetch fresh data
+            print_info("Fetching weather data...")
+            data = await self.weather_manager.get_current_weather()
+
+            if not data:
+                print_error("Failed to fetch weather data")
+                return
+
+            print_info("✓ Weather data updated")
+            # Show the data
+            await self.pws(["show"])
+
+        elif subcmd == "connect":
+            # Connect to weather station
+            success = await self.weather_manager.connect()
+            if not success:
+                print_error("Failed to connect to weather station")
+
+        elif subcmd == "disconnect":
+            # Disconnect from weather station
+            await self.weather_manager.disconnect()
+
+        elif subcmd == "test":
+            # Test connection
+            print_info("Testing connection...")
+            if not self.weather_manager._station:
+                print_error("Not connected to weather station")
+                print_info("Use 'pws connect' first")
+                return
+
+            success = await self.weather_manager._station.test_connection()
+            if success:
+                print_info("✓ Connection test passed")
+            else:
+                print_error("Connection test failed")
+
+        else:
+            print_error(f"Unknown pws command: {subcmd}")
+            print_info("Use 'pws' with no args to see status")
