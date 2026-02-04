@@ -26,3 +26,6 @@ Thumbs.db
 
 # Legacy config (migrated to ~/.tnc_config.json)
 tnc_config.json
+.coverage
+htmlcov/
+.pytest_cache/

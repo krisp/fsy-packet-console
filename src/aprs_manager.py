@@ -2807,7 +2807,7 @@ class APRSManager:
         digipeater_path: List[str] = None,
         dest_addr: str = None,
     ) -> Optional[APRSPosition]:
-        """Parse APRS compressed position format.
+        r"""Parse APRS compressed position format.
 
         Compressed format: /YYYYXXXX$csT
         - / or \ = symbol table (1 byte)
