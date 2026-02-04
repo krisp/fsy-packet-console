@@ -806,13 +806,13 @@ def format_frame_detailed(
                 lines.append(f"  {Colors.RED}>>> ACK MESSAGE <<<{Colors.RESET}")
             else:
                 from prompt_toolkit import HTML
-                lines.append(HTML(f"  <red><b>>>> ACK MESSAGE <<<</b></red>"))
+                lines.append(HTML(f"  <red><b>&gt;&gt;&gt; ACK MESSAGE &lt;&lt;&lt;</b></red>"))
         if details.get('is_rej'):
             if output_format == 'ansi':
                 lines.append(f"  {Colors.RED}>>> REJ MESSAGE <<<{Colors.RESET}")
             else:
                 from prompt_toolkit import HTML
-                lines.append(HTML(f"  <red><b>>>> REJ MESSAGE <<<</b></red>"))
+                lines.append(HTML(f"  <red><b>&gt;&gt;&gt; REJ MESSAGE &lt;&lt;&lt;</b></red>"))
 
         # MIC-E specific fields
         if aprs['type'] == 'APRS MIC-E Position' and 'dest_encoded' in details:
