@@ -34,6 +34,14 @@ from src.ax25_adapter import AX25Adapter
 from src.device_id import get_device_identifier
 from src.constants import *
 from src.digipeater import Digipeater
+from src.frame_analyzer import (
+    decode_ax25_address,
+    decode_control_byte,
+    decode_aprs_info,
+    decode_kiss_frame,
+    format_frame_detailed,
+    sanitize_for_xml as fa_sanitize_for_xml,
+)
 from src.protocol import (
     build_iframe,
     decode_kiss_aprs,
@@ -46,392 +54,52 @@ from src.tnc_bridge import TNCBridge
 from src.utils import *
 from src.web_server import WebServer
 
-
-def sanitize_for_xml(text: str) -> str:
-    """Sanitize text for XML/HTML display by escaping HTML entities and filtering invalid XML characters.
-
-    Valid XML 1.0 characters are:
-    - Tab (0x09), LF (0x0A), CR (0x0D)
-    - Printable characters (0x20 and above)
-
-    Args:
-        text: Input string to sanitize
-
-    Returns:
-        Sanitized string safe for XML/HTML parsing
-    """
-    # First escape HTML entities (&, <, >, etc.)
-    escaped = html.escape(text)
-
-    # Then filter out characters that are invalid in XML
-    # Valid XML chars: \x09 (tab), \x0A (LF), \x0D (CR), and \x20-\uD7FF
-    valid_chars = []
-    for char in escaped:
-        code = ord(char)
-        if code == 0x09 or code == 0x0A or code == 0x0D or (code >= 0x20 and code <= 0xD7FF):
-            valid_chars.append(char)
-        else:
-            # Replace invalid chars with '.'
-            valid_chars.append('.')
-
-    return ''.join(valid_chars)
+# Use sanitize_for_xml from frame_analyzer
+sanitize_for_xml = fa_sanitize_for_xml
 
 
-def decode_ax25_address_field(data, is_dest=False):
-    """
-    Decode AX.25 address field (7 bytes).
-
-    Returns dict with callsign, ssid, has_been_repeated, command, last_address
-    """
-    if len(data) < 7:
-        return None
-
-    # Decode callsign (6 bytes, shifted right by 1)
-    # Filter to printable ASCII only (space to ~)
-    callsign = ''.join(
-        chr(b >> 1) if 32 <= (b >> 1) <= 126 else '?'
-        for b in data[:6]
-    ).strip()
-
-    # Decode SSID byte
-    ssid_byte = data[6]
-    ssid = (ssid_byte >> 1) & 0x0F
-    has_been_repeated = bool(ssid_byte & 0x80)  # H-bit
-    reserved_bits = (ssid_byte >> 5) & 0x03
-    last_address = bool(ssid_byte & 0x01)  # Extension bit
-
-    # Command/Response bits (in reserved field)
-    if is_dest:
-        command_bit = bool(reserved_bits & 0x02)
-    else:
-        command_bit = bool(reserved_bits & 0x01)
-
-    return {
-        'callsign': callsign,
-        'ssid': ssid,
-        'full': f"{callsign}-{ssid}" if ssid else callsign,
-        'has_been_repeated': has_been_repeated,
-        'command': command_bit,
-        'last_address': last_address,
-    }
+# Use decode_ax25_address from frame_analyzer (adds 'raw' key but otherwise compatible)
+decode_ax25_address_field = decode_ax25_address
 
 
 def decode_control_field(control):
     """
-    Decode AX.25 control byte.
-
-    Returns dict with frame_type, ns, nr, pf, description
+    Wrapper for decode_control_byte from frame_analyzer.
+    Adapts the return value to match console.py's expected structure.
     """
-    # Check frame type
-    if (control & 0x01) == 0:
-        # I-frame (Information)
-        frame_type = "I"
-        ns = (control >> 1) & 0x07
-        nr = (control >> 5) & 0x07
-        pf = bool(control & 0x10)
-        desc = f"I-frame: N(S)={ns}, N(R)={nr}, P/F={pf}"
-        return {'type': 'I', 'ns': ns, 'nr': nr, 'pf': pf, 'desc': desc, 'raw': control}
-    elif (control & 0x03) == 0x01:
-        # S-frame (Supervisory)
-        nr = (control >> 5) & 0x07
-        pf = bool(control & 0x10)
-        s_type = (control >> 2) & 0x03
-        s_names = {0: "RR", 1: "RNR", 2: "REJ", 3: "SREJ"}
-        s_desc = {0: "Receive Ready", 1: "Receive Not Ready", 2: "Reject", 3: "Selective Reject"}
-        name = s_names.get(s_type, 'Unknown')
-        desc = f"S-frame: {name} ({s_desc.get(s_type, 'Unknown')}), N(R)={nr}, P/F={pf}"
-        return {'type': 'S', 'subtype': name, 'nr': nr, 'pf': pf, 'desc': desc, 'raw': control}
-    else:
-        # U-frame (Unnumbered)
-        pf = bool(control & 0x10)
-        u_types = {
-            0x2F: "SABM (Set Async Balanced Mode)",
-            0x63: "UA (Unnumbered Ack)",
-            0x43: "DISC (Disconnect)",
-            0x0F: "DM (Disconnected Mode)",
-            0x87: "FRMR (Frame Reject)",
-            0x03: "UI (Unnumbered Information)"
-        }
-        desc = f"U-frame: {u_types.get(control, f'Unknown (0x{control:02X})')}, P/F={pf}"
-        return {'type': 'U', 'pf': pf, 'desc': desc, 'raw': control}
+    result = decode_control_byte(control)
+    # Adapt frame_analyzer structure to console structure
+    # frame_analyzer uses 'frame_type' and 'description', console expects 'type' and 'desc'
+    result['type'] = result['frame_type']
+    result['desc'] = result['description']
+    return result
 
 
 def decode_aprs_packet_type(info_str, dest_addr=None):
     """
-    Decode APRS information field and identify packet type.
+    Wrapper for decode_aprs_info from frame_analyzer.
+    Adapts the return value from nested structure to flat structure expected by console.
 
-    Args:
-        info_str: APRS information field
-        dest_addr: Destination address (needed for MIC-E decoding)
-
-    Returns dict with type and details
+    frame_analyzer returns: {'type': 'X', 'details': {fields...}}
+    console expects: {'type': 'X', fields...}
     """
-    if not info_str:
-        return {'type': 'Empty', 'details': {}}
+    result = decode_aprs_info(info_str, dest_addr)
 
-    first_char = info_str[0] if len(info_str) > 0 else ''
+    # Flatten the structure by merging details into top level
+    if 'details' in result:
+        details = result.pop('details')
+        result.update(details)
 
-    # APRS Message
-    if first_char == ':':
-        if len(info_str) >= 11:
-            to_call = info_str[1:10].strip()
-            message_text = info_str[11:]
-            msg_id = None
-            if '{' in message_text:
-                text, msg_id = message_text.split('{', 1)
-                message_text = text
-            is_ack = message_text.startswith('ack')
-            is_rej = message_text.startswith('rej')
-            return {
-                'type': 'APRS Message',
-                'to': to_call,
-                'message': message_text,
-                'message_id': msg_id,
-                'is_ack': is_ack,
-                'is_rej': is_rej
-            }
+    return result
 
-    # Position Reports
-    elif first_char in ('!', '=', '@', '/'):
-        result = {'type': 'APRS Position'}
-        try:
-            # Determine offset based on timestamp presence
-            offset = 8 if first_char in ('@', '/') else 1
 
-            if len(info_str) >= offset + 19:
-                # Parse lat/lon
-                lat_str = info_str[offset:offset+8]
-                lon_str = info_str[offset+9:offset+18]
-                symbol_table = info_str[offset+8] if offset+8 < len(info_str) else '/'
-                symbol_code = info_str[offset+18] if offset+18 < len(info_str) else '>'
-                comment = info_str[offset+19:].strip() if len(info_str) > offset+19 else ''
-
-                # Parse latitude (DDMMmmN/S)
-                lat_deg = int(lat_str[0:2])
-                lat_min = float(lat_str[2:7])
-                lat_dir = lat_str[7]
-                latitude = lat_deg + (lat_min / 60.0)
-                if lat_dir in ('S', 's'):
-                    latitude = -latitude
-
-                # Parse longitude (DDDMMmmW/E)
-                lon_deg = int(lon_str[0:3])
-                lon_min = float(lon_str[3:8])
-                lon_dir = lon_str[8]
-                longitude = lon_deg + (lon_min / 60.0)
-                if lon_dir in ('W', 'w'):
-                    longitude = -longitude
-
-                result['latitude'] = latitude
-                result['longitude'] = longitude
-                result['symbol'] = f"{symbol_table}{symbol_code}"
-                result['comment'] = comment
-
-                # Check for weather data in comment
-                if re.search(r"[cstgrhpPb]\d{2,3}", comment):
-                    result['has_weather'] = True
-
-                    # Parse weather fields
-                    match = re.search(r"c(\d{3})s(\d{3})", comment)
-                    if match:
-                        result['wind_dir'] = int(match.group(1))
-                        result['wind_speed'] = int(match.group(2))
-
-                    match = re.search(r"g(\d{3})", comment)
-                    if match:
-                        result['wind_gust'] = int(match.group(1))
-
-                    match = re.search(r"t(-?\d{3})", comment)
-                    if match:
-                        temp = int(match.group(1))
-                        if temp > 200:
-                            temp = temp - 256
-                        result['temperature'] = temp
-
-                    match = re.search(r"h(\d{2})", comment)
-                    if match:
-                        humidity = int(match.group(1))
-                        result['humidity'] = 100 if humidity == 0 else humidity
-
-                    match = re.search(r"b(\d{5})", comment)
-                    if match:
-                        result['pressure'] = int(match.group(1)) / 10.0
-        except:
-            pass
-        return result
-
-    # MIC-E
-    elif first_char == '`' or first_char == "'":
-        result = {'type': 'APRS MIC-E Position', 'format': 'compressed'}
-
-        # Decode MIC-E if we have destination address
-        if dest_addr and len(dest_addr) >= 6 and len(info_str) >= 9:
-            try:
-                # Remove SSID from dest_addr if present
-                dest_call = dest_addr.split("-")[0] if "-" in dest_addr else dest_addr
-
-                # Decode latitude from destination address
-                lat_digits = []
-                msg_bits = []
-
-                for ch in dest_call[:6]:
-                    if "0" <= ch <= "9":
-                        lat_digits.append(ch)
-                        msg_bits.append(0)
-                    elif "A" <= ch <= "J":
-                        lat_digits.append(str(ord(ch) - ord("A")))
-                        msg_bits.append(1)
-                    elif "P" <= ch <= "Y":
-                        lat_digits.append(str(ord(ch) - ord("P")))
-                        msg_bits.append(1)
-                    elif ch in ("K", "L", "Z"):
-                        lat_digits.append("0")  # Space = zero
-                        msg_bits.append(0 if ch == "L" else 1)
-
-                if len(lat_digits) == 6 and len(msg_bits) >= 6:
-                    # Decode latitude
-                    lat_str = "".join(lat_digits)
-                    lat_deg = int(lat_str[0:2])
-                    lat_min = float(lat_str[2:4] + "." + lat_str[4:6])
-                    latitude = lat_deg + (lat_min / 60.0)
-
-                    # N/S from message bit 3
-                    if msg_bits[3] == 0:
-                        latitude = -latitude  # South
-
-                    # Decode longitude from info bytes 1-3
-                    lon_deg = ord(info_str[1]) - 28
-                    lon_min = ord(info_str[2]) - 28
-                    lon_min_frac = ord(info_str[3]) - 28
-
-                    # Longitude offset from message bit 4
-                    if msg_bits[4] == 1:
-                        lon_deg += 100
-
-                    longitude = lon_deg + ((lon_min + lon_min_frac / 100.0) / 60.0)
-
-                    # E/W from message bit 5
-                    if msg_bits[5] == 1:
-                        longitude = -longitude  # West
-
-                    # Extract speed and course
-                    speed_course = ord(info_str[4]) - 28
-                    speed = ((ord(info_str[5]) - 28) * 10) + ((speed_course // 10) % 10)
-                    course = ((speed_course % 10) * 100) + (ord(info_str[6]) - 28)
-
-                    # Symbol
-                    symbol_code = info_str[7] if len(info_str) > 7 else ">"
-                    symbol_table = info_str[8] if len(info_str) > 8 else "/"
-
-                    # Comment (after position data)
-                    comment = info_str[9:] if len(info_str) > 9 else ""
-
-                    # Strip type indicator
-                    if comment and ord(comment[0]) in (0x20, 0x3E, 0x5D, 0x60, 0x27):
-                        comment = comment[1:]
-
-                    # Keep only printable chars
-                    comment = "".join(c for c in comment if 0x20 <= ord(c) <= 0x7E)
-
-                    # Decode MIC-E message type from message bits
-                    msg_type_bits = (msg_bits[0] << 2) | (msg_bits[1] << 1) | msg_bits[2]
-                    msg_types = {
-                        0: "Emergency",
-                        1: "Priority",
-                        2: "Special",
-                        3: "Committed",
-                        4: "Returning",
-                        5: "In Service",
-                        6: "En Route",
-                        7: "Off Duty"
-                    }
-                    message_type = msg_types.get(msg_type_bits, f"Unknown ({msg_type_bits})")
-
-                    # Store all decoded fields
-                    result['latitude'] = latitude
-                    result['longitude'] = longitude
-                    result['speed'] = speed
-                    result['course'] = course
-                    result['symbol'] = f"{symbol_table}{symbol_code}"
-                    result['comment'] = comment.strip()
-                    result['message_type'] = message_type
-                    result['dest_encoded'] = dest_call
-
-            except Exception as e:
-                # If decode fails, just show raw data
-                result['data'] = info_str[:40]
-                result['decode_error'] = str(e)
-
-        return result
-
-    # Weather
-    elif first_char == '_':
-        result = {'type': 'APRS Weather'}
-        try:
-            # Parse weather fields from standalone weather report
-            match = re.search(r"_(\d{3})/(\d{3})", info_str)
-            if match:
-                result['wind_dir'] = int(match.group(1))
-                result['wind_speed'] = int(match.group(2))
-
-            match = re.search(r"g(\d{3})", info_str)
-            if match:
-                result['wind_gust'] = int(match.group(1))
-
-            match = re.search(r"t(-?\d{3})", info_str)
-            if match:
-                temp = int(match.group(1))
-                if temp > 200:
-                    temp = temp - 256
-                result['temperature'] = temp
-
-            match = re.search(r"h(\d{2})", info_str)
-            if match:
-                humidity = int(match.group(1))
-                result['humidity'] = 100 if humidity == 0 else humidity
-
-            match = re.search(r"b(\d{5})", info_str)
-            if match:
-                result['pressure'] = int(match.group(1)) / 10.0
-
-            match = re.search(r"r(\d{3})", info_str)
-            if match:
-                result['rain_1h'] = int(match.group(1)) / 100.0
-
-            match = re.search(r"p(\d{3})", info_str)
-            if match:
-                result['rain_24h'] = int(match.group(1)) / 100.0
-        except:
-            pass
-        return result
-
-    # Telemetry
-    elif info_str.startswith('T#'):
-        return {'type': 'APRS Telemetry', 'data': info_str}
-
-    # Status
-    elif first_char == '>':
-        return {'type': 'APRS Status', 'status': info_str[1:]}
-
-    # Object
-    elif first_char == ';':
-        return {'type': 'APRS Object', 'data': info_str[:40]}
-
-    # Item
-    elif first_char == ')':
-        return {'type': 'APRS Item', 'data': info_str[:40]}
-
-    # Third-party
-    elif first_char == '}':
-        return {'type': 'APRS Third-Party', 'data': info_str[:50]}
-
-    else:
-        return {'type': 'Unknown APRS', 'data': info_str[:50]}
 
 
 def format_detailed_frame(frame, index=1):
     """
-    Format a frame with detailed Wireshark-style protocol analysis.
+    Wrapper for format_frame_detailed from frame_analyzer.
+    Converts FrameHistoryEntry to the structure expected by format_frame_detailed,
+    then adds device identification logic specific to console.py.
 
     Args:
         frame: FrameHistoryEntry object
@@ -440,245 +108,74 @@ def format_detailed_frame(frame, index=1):
     Returns:
         List of HTML-formatted strings for display
     """
-    lines = []
+    # Decode the KISS frame using frame_analyzer
+    decoded = decode_kiss_frame(frame.raw_bytes)
+
+    # Format timestamp
     time_str = frame.timestamp.strftime("%H:%M:%S.%f")[:-3]
-    direction_color = "green" if frame.direction == "TX" else "cyan"
 
-    # Header
-    lines.append(HTML(f"<b>{'=' * 80}</b>"))
-    lines.append(HTML(f"<b>Frame {index}: <{direction_color}>{frame.direction}</{direction_color}> {time_str} ({len(frame.raw_bytes)} bytes)</b>"))
-    lines.append(HTML(f"<b>{'=' * 80}</b>"))
+    # Use format_frame_detailed from frame_analyzer with HTML output
+    lines = format_frame_detailed(
+        decoded=decoded,
+        frame_num=index,
+        timestamp=time_str,
+        direction=frame.direction,
+        output_format='html'
+    )
 
-    raw_bytes = frame.raw_bytes
+    # Add console-specific device identification if APRS data is present
+    # Insert device info before hex dump section
+    if decoded.get('aprs') and not 'error' in decoded:
+        aprs = decoded['aprs']
+        dest = decoded.get('ax25', {}).get('destination', {})
+        dest_call = dest.get('callsign') if dest else None
 
-    # Check KISS framing
-    if len(raw_bytes) < 3 or raw_bytes[0] != 0xC0 or raw_bytes[-1] != 0xC0:
-        lines.append(HTML("<red>ERROR: Invalid KISS framing</red>"))
-        return lines
+        device_info = None
+        try:
+            device_id = get_device_identifier()
 
-    # KISS Layer
-    kiss_cmd = raw_bytes[1]
-    kiss_type = "Data Frame" if kiss_cmd == 0 else f"Command {kiss_cmd}"
-    lines.append(HTML(f"\n<cyan><b>KISS Layer</b></cyan>"))
-    lines.append(HTML(f"  Command: 0x{kiss_cmd:02X} ({kiss_type})"))
+            # Try to identify by tocall (destination address) for normal APRS
+            if dest_call:
+                device_info = device_id.identify_by_tocall(dest_call)
 
-    # AX.25 payload
-    ax25_payload = raw_bytes[2:-1]
+            # For MIC-E, try to identify by comment suffix
+            details = aprs.get('details', {})
+            if not device_info and aprs.get('type') == 'APRS MIC-E Position' and 'comment' in details:
+                device_info = device_id.identify_by_mice(details.get('comment', ''))
 
-    if len(ax25_payload) < 16:
-        lines.append(HTML("<red>ERROR: AX.25 payload too short</red>"))
-        return lines
+            if device_info:
+                # Find where to insert (before hex dump)
+                insert_index = len(lines)
+                for i, line in enumerate(lines):
+                    line_text = str(line) if hasattr(line, '__str__') else ''
+                    if 'Hex Dump' in line_text:
+                        insert_index = i
+                        break
 
-    # AX.25 Layer
-    lines.append(HTML(f"\n<cyan><b>AX.25 Layer</b></cyan>"))
+                # Create device info lines
+                device_lines = [
+                    HTML(f"\n<cyan><b>Device Identification</b></cyan>"),
+                    HTML(f"  Vendor: <green>{sanitize_for_xml(device_info.vendor)}</green>"),
+                    HTML(f"  Model: <green>{sanitize_for_xml(device_info.model)}</green>")
+                ]
 
-    # Destination
-    dest = decode_ax25_address_field(ax25_payload[0:7], is_dest=True)
-    if dest:
-        lines.append(HTML(f"  Destination: <green><b>{sanitize_for_xml(dest['full'])}</b></green>"))
-        lines.append(HTML(f"    Callsign: {sanitize_for_xml(dest['callsign'])}, SSID: {dest['ssid']}, Command: {dest['command']}"))
+                if device_info.version:
+                    device_lines.append(HTML(f"  Version: <green>{sanitize_for_xml(device_info.version)}</green>"))
+                if device_info.class_type:
+                    device_lines.append(HTML(f"  Class: <yellow>{sanitize_for_xml(device_info.class_type)}</yellow>"))
 
-    # Source
-    src = decode_ax25_address_field(ax25_payload[7:14], is_dest=False)
-    if src:
-        lines.append(HTML(f"  Source: <green><b>{sanitize_for_xml(src['full'])}</b></green>"))
-        lines.append(HTML(f"    Callsign: {sanitize_for_xml(src['callsign'])}, SSID: {src['ssid']}, Command: {src['command']}"))
+                # Show detection method
+                if aprs.get('type') == 'APRS MIC-E Position':
+                    device_lines.append(HTML(f"  <gray>(detected from MIC-E comment suffix)</gray>"))
+                else:
+                    device_lines.append(HTML(f"  <gray>(detected from destination: {sanitize_for_xml(dest_call)})</gray>"))
 
-    # Digipeater path
-    offset = 14
-    digipeaters = []
-    while not ax25_payload[offset - 1] & 0x01:
-        if offset + 7 > len(ax25_payload):
-            break
-        digi = decode_ax25_address_field(ax25_payload[offset:offset+7])
-        if digi:
-            digipeaters.append(digi)
-        offset += 7
+                # Insert at found position
+                lines = lines[:insert_index] + device_lines + lines[insert_index:]
 
-    if digipeaters:
-        lines.append(HTML(f"  Digipeater Path: ({len(digipeaters)} hop{'s' if len(digipeaters) > 1 else ''})"))
-        for i, digi in enumerate(digipeaters, 1):
-            repeated = "<yellow>*</yellow>" if digi['has_been_repeated'] else ""
-            lines.append(HTML(f"    [{i}] <blue>{sanitize_for_xml(digi['full'])}{repeated}</blue> (repeated: {digi['has_been_repeated']})"))
-    else:
-        lines.append(HTML(f"  Digipeater Path: (none)"))
-
-    # Control
-    if offset < len(ax25_payload):
-        ctrl = decode_control_field(ax25_payload[offset])
-        lines.append(HTML(f"  Control: 0x{ctrl['raw']:02X} - <yellow>{ctrl['desc']}</yellow>"))
-        if 'ns' in ctrl and ctrl['ns'] is not None:
-            lines.append(HTML(f"    N(S): {ctrl['ns']}"))
-        if 'nr' in ctrl and ctrl['nr'] is not None:
-            lines.append(HTML(f"    N(R): {ctrl['nr']}"))
-        offset += 1
-
-    # PID
-    if offset < len(ax25_payload):
-        pid = ax25_payload[offset]
-        pid_desc = "No layer 3" if pid == 0xF0 else f"Protocol 0x{pid:02X}"
-        lines.append(HTML(f"  PID: 0x{pid:02X} ({pid_desc})"))
-        offset += 1
-
-    # Information field
-    if offset < len(ax25_payload):
-        info_bytes = ax25_payload[offset:]
-        info_str = info_bytes.decode('ascii', errors='replace').rstrip('\r\n\x00')
-
-        lines.append(HTML(f"\n<cyan><b>Information Field ({len(info_bytes)} bytes)</b></cyan>"))
-        lines.append(HTML(f"  <magenta>{sanitize_for_xml(info_str)}</magenta>"))
-
-        # APRS Layer
-        dest_call = dest['callsign'] if dest else None
-        aprs = decode_aprs_packet_type(info_str, dest_addr=dest_call)
-        if aprs:
-            lines.append(HTML(f"\n<cyan><b>APRS Layer</b></cyan>"))
-            lines.append(HTML(f"  Packet Type: <green><b>{sanitize_for_xml(aprs['type'])}</b></green>"))
-
-            if aprs.get('is_ack'):
-                lines.append(HTML(f"  <red><b>>>> ACK MESSAGE <<<</b></red>"))
-            if aprs.get('is_rej'):
-                lines.append(HTML(f"  <red><b>>>> REJ MESSAGE <<<</b></red>"))
-
-            # Display MIC-E specific fields first
-            if aprs['type'] == 'APRS MIC-E Position':
-                if 'dest_encoded' in aprs:
-                    lines.append(HTML(f"  <b>MIC-E Encoded:</b>"))
-                    lines.append(HTML(f"    Destination: <yellow>{sanitize_for_xml(aprs['dest_encoded'])}</yellow> (encodes lat/msg)"))
-
-                if 'message_type' in aprs:
-                    lines.append(HTML(f"    Message Type: <green>{sanitize_for_xml(aprs['message_type'])}</green>"))
-
-            # Display position data if present
-            if 'latitude' in aprs and 'longitude' in aprs:
-                lines.append(HTML(f"  <b>Position:</b>"))
-                lines.append(HTML(f"    Latitude:  {aprs['latitude']:.6f}°"))
-                lines.append(HTML(f"    Longitude: {aprs['longitude']:.6f}°"))
-
-                # Calculate grid square
-                try:
-                    from src.aprs_manager import APRSManager
-                    grid = APRSManager.latlon_to_maidenhead(aprs['latitude'], aprs['longitude'])
-                    lines.append(HTML(f"    Grid Square: <cyan>{grid}</cyan>"))
-                except:
-                    pass
-
-                if 'symbol' in aprs:
-                    lines.append(HTML(f"    Symbol: {sanitize_for_xml(aprs['symbol'])}"))
-
-                # MIC-E speed and course
-                if 'speed' in aprs:
-                    lines.append(HTML(f"    Speed: <green>{aprs['speed']} mph</green>"))
-                if 'course' in aprs:
-                    lines.append(HTML(f"    Course: <green>{aprs['course']}°</green>"))
-
-                if 'comment' in aprs and aprs['comment']:
-                    # Display comment without weather data if present
-                    comment = aprs['comment']
-                    if aprs.get('has_weather'):
-                        # Strip weather data for cleaner display
-                        comment = re.sub(r'[cstgrhpPb]\d{2,5}', '', comment).strip()
-                    if comment:
-                        lines.append(HTML(f"    Comment: {sanitize_for_xml(comment)}"))
-
-            # Display weather data if present
-            if aprs.get('has_weather') or aprs['type'] == 'APRS Weather':
-                has_data = False
-                wx_lines = []
-
-                if 'temperature' in aprs:
-                    wx_lines.append(f"    Temperature: {aprs['temperature']}°F")
-                    has_data = True
-                if 'wind_speed' in aprs:
-                    wind_dir = aprs.get('wind_dir', 0)
-                    wx_lines.append(f"    Wind: {wind_dir}° @ {aprs['wind_speed']} mph")
-                    has_data = True
-                if 'wind_gust' in aprs:
-                    wx_lines.append(f"    Gust: {aprs['wind_gust']} mph")
-                    has_data = True
-                if 'humidity' in aprs:
-                    wx_lines.append(f"    Humidity: {aprs['humidity']}%")
-                    has_data = True
-                if 'pressure' in aprs:
-                    wx_lines.append(f"    Pressure: {aprs['pressure']:.1f} mbar")
-                    has_data = True
-                if 'rain_1h' in aprs:
-                    wx_lines.append(f"    Rain (1h): {aprs['rain_1h']:.2f} in")
-                    has_data = True
-                if 'rain_24h' in aprs:
-                    wx_lines.append(f"    Rain (24h): {aprs['rain_24h']:.2f} in")
-                    has_data = True
-
-                if has_data:
-                    lines.append(HTML(f"  <b>Weather Data:</b>"))
-                    for wx_line in wx_lines:
-                        lines.append(HTML(wx_line))
-
-            # Display message data
-            if 'to' in aprs:
-                lines.append(HTML(f"  <b>Message To:</b> {sanitize_for_xml(aprs['to'])}"))
-            if 'message' in aprs:
-                lines.append(HTML(f"  <b>Message Text:</b> {sanitize_for_xml(aprs['message'])}"))
-            if 'message_id' in aprs and aprs['message_id']:
-                lines.append(HTML(f"  <b>Message ID:</b> {sanitize_for_xml(aprs['message_id'])}"))
-
-            # Display status
-            if 'status' in aprs:
-                lines.append(HTML(f"  <b>Status:</b> {sanitize_for_xml(aprs['status'])}"))
-
-            # Display any remaining fields not handled above
-            skip_keys = {'type', 'is_ack', 'is_rej', 'latitude', 'longitude', 'symbol',
-                        'comment', 'has_weather', 'temperature', 'wind_dir', 'wind_speed',
-                        'wind_gust', 'humidity', 'pressure', 'rain_1h', 'rain_24h',
-                        'to', 'message', 'message_id', 'status', 'speed', 'course',
-                        'message_type', 'dest_encoded', 'format', 'data', 'decode_error'}
-            for key, value in aprs.items():
-                if key not in skip_keys and value is not None:
-                    lines.append(HTML(f"  {key.capitalize()}: {sanitize_for_xml(str(value))}"))
-
-            # Device identification
-            device_info = None
-            try:
-                device_id = get_device_identifier()
-
-                # Try to identify by tocall (destination address) for normal APRS
-                if dest_call:
-                    device_info = device_id.identify_by_tocall(dest_call)
-
-                # For MIC-E, try to identify by comment suffix
-                if not device_info and aprs['type'] == 'APRS MIC-E Position' and 'comment' in aprs:
-                    device_info = device_id.identify_by_mice(aprs.get('comment', ''))
-
-                if device_info:
-                    lines.append(HTML(f"\n<cyan><b>Device Identification</b></cyan>"))
-                    lines.append(HTML(f"  Vendor: <green>{sanitize_for_xml(device_info.vendor)}</green>"))
-                    lines.append(HTML(f"  Model: <green>{sanitize_for_xml(device_info.model)}</green>"))
-                    if device_info.version:
-                        lines.append(HTML(f"  Version: <green>{sanitize_for_xml(device_info.version)}</green>"))
-                    if device_info.class_type:
-                        lines.append(HTML(f"  Class: <yellow>{sanitize_for_xml(device_info.class_type)}</yellow>"))
-
-                    # Show detection method
-                    if aprs['type'] == 'APRS MIC-E Position':
-                        lines.append(HTML(f"  <gray>(detected from MIC-E comment suffix)</gray>"))
-                    else:
-                        lines.append(HTML(f"  <gray>(detected from destination: {sanitize_for_xml(dest_call)})</gray>"))
-
-            except Exception as e:
-                # Silently fail device detection - not critical
-                pass
-
-    # Hex dump
-    lines.append(HTML(f"\n<cyan><b>Hex Dump (AX.25 Payload)</b></cyan>"))
-    for i in range(0, len(ax25_payload), 16):
-        chunk = ax25_payload[i:i+16]
-        offset_str = f"{i:04x}"
-        hex_part = ' '.join(f"{b:02x}" for b in chunk).ljust(47)
-        ascii_part = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
-        lines.append(HTML(f"  {offset_str}  {hex_part}  {sanitize_for_xml(ascii_part)}"))
-
-    # Full frame
-    lines.append(HTML(f"\n<gray>Full KISS Frame (hex): {raw_bytes.hex()}</gray>"))
+        except Exception:
+            # Silently fail device detection - not critical
+            pass
 
     return lines
 
