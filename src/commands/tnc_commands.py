@@ -362,8 +362,33 @@ class TNCCommandHandler(CommandHandler):
              category="config")
     async def display(self, args):
         """Display all TNC configuration parameters."""
+        # Whitelist of valid parameters (prevent stray entries from showing)
+        VALID_PARAMS = {
+            # Identity
+            'MYCALL', 'MYALIAS', 'MYLOCATION', 'RADIO_MAC',
+            # Protocol
+            'UNPROTO', 'MONITOR', 'TXDELAY', 'DEBUGFRAMES',
+            # APRS Messaging
+            'AUTO_ACK', 'RETRY', 'RETRY_FAST', 'RETRY_SLOW',
+            # Beaconing
+            'BEACON', 'BEACON_INTERVAL', 'BEACON_PATH',
+            'BEACON_SYMBOL', 'BEACON_COMMENT', 'LAST_BEACON',
+            # Digipeater
+            'DIGIPEAT',
+            # Debug
+            'DEBUG_BUFFER',
+            # Server Ports
+            'AGWPE_HOST', 'AGWPE_PORT', 'TNC_HOST', 'TNC_PORT',
+            'WEBUI_HOST', 'WEBUI_PORT',
+            # Weather Station
+            'WX_ENABLE', 'WX_BACKEND', 'WX_ADDRESS', 'WX_PORT',
+            'WX_INTERVAL', 'WX_AVERAGE_WIND', 'WXTREND',
+        }
+
         print_pt(HTML("<cyan><b>TNC Parameters:</b></cyan>"))
         for key in sorted(self.tnc_config.settings.keys()):
+            if key not in VALID_PARAMS:
+                continue  # Skip invalid/deprecated parameters
             value = self.tnc_config.get(key)
             print_pt(f"  {key:20s} {value}")
 
