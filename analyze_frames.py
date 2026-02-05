@@ -100,19 +100,25 @@ def load_frame_buffer(buffer_file=None):
         return []
 
 
-def analyze_frame(frame_num, timestamp, byte_count, frame_hex, direction='RX'):
+def analyze_frame(frame_num, timestamp, byte_count, frame_hex, direction='RX', use_colors=True):
     """Analyze a single frame and return decoded data and output."""
     # Decode the frame
     decoded = decode_kiss_frame(frame_hex)
 
-    # Format output using format_frame_detailed with ANSI colors
+    # Format output using format_frame_detailed with or without colors
+    output_format = 'ansi' if use_colors else 'ansi'  # Both use ansi, but without color codes if not TTY
     output = format_frame_detailed(
         decoded=decoded,
         frame_num=frame_num,
         timestamp=timestamp,
         direction=direction,
-        output_format='ansi'
+        output_format=output_format
     )
+
+    # Strip ANSI codes if not outputting to a TTY
+    if not use_colors:
+        import re
+        output = re.sub(r'\x1b\[[0-9;]*m', '', output)
 
     # Track ACKs
     is_ack = (decoded.get('aprs') and
@@ -149,6 +155,9 @@ Examples:
 
   # Use custom buffer file
   %(prog)s --buffer-file /path/to/buffer.json.gz --frames 5
+
+  # Pipe to grep (colors auto-disabled)
+  %(prog)s -b -l | grep NTSGTE
         '''
     )
 
@@ -184,13 +193,37 @@ Examples:
         help='List all available frames without analyzing'
     )
 
+    parser.add_argument(
+        '--color',
+        choices=['auto', 'always', 'never'],
+        default='auto',
+        help='When to use colors (default: auto - disable if piping)'
+    )
+
     args = parser.parse_args()
+
+    # Determine whether to use colors
+    if args.color == 'always':
+        use_colors = True
+    elif args.color == 'never':
+        use_colors = False
+    else:  # auto
+        use_colors = sys.stdout.isatty()
 
     # Determine source of frames
     if args.buffer or args.buffer_file or args.frames or args.range or args.list:
         # Load from buffer database
-        print(f"{Colors.BOLD}KISS/AX.25/APRS Protocol Analyzer{Colors.RESET}")
-        print(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}")
+        # Helper to strip colors if needed
+        def format_output(text):
+            if not use_colors:
+                import re
+                text = re.sub(r'\x1b\[[0-9;]*m', '', text)
+            return text
+
+        header = f"{Colors.BOLD}KISS/AX.25/APRS Protocol Analyzer{Colors.RESET}"
+        print(format_output(header))
+        separator = f"{Colors.BOLD}{'=' * 80}{Colors.RESET}"
+        print(format_output(separator))
 
         buffer_file = args.buffer_file if args.buffer_file else None
         all_frames = load_frame_buffer(buffer_file)
@@ -203,12 +236,13 @@ Examples:
         if all_frames:
             print(f"Frame range: {all_frames[0][0]} to {all_frames[-1][0]}")
 
-        print(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}")
+        print(format_output(separator))
         print()
 
         # List mode
         if args.list:
-            print(f"{Colors.BOLD}Available Frames:{Colors.RESET}\n")
+            list_header = f"{Colors.BOLD}Available Frames:{Colors.RESET}\n"
+            print(format_output(list_header))
             for frame_num, timestamp, byte_count, frame_hex, direction in all_frames:
                 # Decode frame to get callsigns and payload preview
                 decoded = decode_kiss_frame(frame_hex)
@@ -230,7 +264,8 @@ Examples:
                         payload_preview = "(no info field)"
 
                 # Format output as single line
-                print(f"  [{direction}] Frame {frame_num:5d}: {timestamp} ({byte_count:4s}b) {Colors.GREEN}{from_call:12}{Colors.RESET} → {Colors.GREEN}{to_call:12}{Colors.RESET} {Colors.MAGENTA}{payload_preview}{Colors.RESET}")
+                line = f"  [{direction}] Frame {frame_num:5d}: {timestamp} ({byte_count:4s}b) {Colors.GREEN}{from_call:12}{Colors.RESET} → {Colors.GREEN}{to_call:12}{Colors.RESET} {Colors.MAGENTA}{payload_preview}{Colors.RESET}"
+                print(format_output(line))
             print()
             return
 
@@ -246,7 +281,8 @@ Examples:
             found_nums = {f[0] for f in frames_to_analyze}
             missing = frame_nums - found_nums
             if missing:
-                print(f"{Colors.YELLOW}Warning: Frame(s) not found: {sorted(missing)}{Colors.RESET}\n")
+                warning = f"{Colors.YELLOW}Warning: Frame(s) not found: {sorted(missing)}{Colors.RESET}\n"
+                print(format_output(warning))
 
         elif args.range:
             # Frame range
@@ -255,11 +291,13 @@ Examples:
                 frames_to_analyze = [f for f in all_frames if start <= f[0] <= end]
 
                 if not frames_to_analyze:
-                    print(f"{Colors.YELLOW}No frames in range {start}-{end}{Colors.RESET}")
+                    no_frames = f"{Colors.YELLOW}No frames in range {start}-{end}{Colors.RESET}"
+                    print(format_output(no_frames))
                     return
 
             except ValueError:
-                print(f"{Colors.RED}Error: Invalid range format. Use START-END (e.g., 100-150){Colors.RESET}")
+                error = f"{Colors.RED}Error: Invalid range format. Use START-END (e.g., 100-150){Colors.RESET}"
+                print(format_output(error))
                 return
 
         else:
@@ -271,7 +309,7 @@ Examples:
         acks_found = []
 
         for frame_num, timestamp, byte_count, frame_hex, direction in frames_to_analyze:
-            decoded, output, ack_info = analyze_frame(frame_num, timestamp, byte_count, frame_hex, direction)
+            decoded, output, ack_info = analyze_frame(frame_num, timestamp, byte_count, frame_hex, direction, use_colors)
             print(output)
             frames_analyzed += 1
 
@@ -309,7 +347,7 @@ Examples:
                     continue
 
                 frame_num, timestamp, byte_count, frame_hex = parsed
-                decoded, output, ack_info = analyze_frame(frame_num, timestamp, byte_count, frame_hex)
+                decoded, output, ack_info = analyze_frame(frame_num, timestamp, byte_count, frame_hex, use_colors=use_colors)
                 print(output)
                 frames_analyzed += 1
 
