@@ -341,11 +341,13 @@ class APRSConsoleCommandHandler(CommandHandler):
         our_lat = None
         our_lon = None
 
-        # Try GPS first
+        # Try GPS first (gps_position is a dict with 'latitude'/'longitude' keys)
         if self.cmd_processor.gps_position:
-            our_lat = self.cmd_processor.gps_position[0]
-            our_lon = self.cmd_processor.gps_position[1]
-        else:
+            our_lat = self.cmd_processor.gps_position.get('latitude')
+            our_lon = self.cmd_processor.gps_position.get('longitude')
+
+        # Fall back to MYLOCATION if GPS not available or incomplete
+        if our_lat is None or our_lon is None:
             # Fall back to MYLOCATION
             mylocation = self.tnc_config.get("MYLOCATION")
             if mylocation:
