@@ -98,6 +98,9 @@ class APRSManager:
         self.db_file = os.path.expanduser("~/.aprs_stations.json.gz")
         self.db_file_legacy = os.path.expanduser("~/.aprs_stations.json")
 
+        # Migration state (populated by load_database or migration system)
+        self.migrations = {}
+
         # Load persistent database
         self.load_database()
 
@@ -167,6 +170,7 @@ class APRSManager:
             data = {
                 "stations": {},
                 "messages": [],
+                "migrations": getattr(self, 'migrations', {}),  # Migration state
                 "saved_at": datetime.now().isoformat(),
             }
 
@@ -618,6 +622,9 @@ class APRSManager:
                 ):
                     self.messages.append(msg)
 
+            # Restore migration state
+            self.migrations = data.get("migrations", {})
+
             # Success message
             parse_time = time.time() - parse_start
             load_time = time.time() - load_start
@@ -813,7 +820,9 @@ class APRSManager:
         if not is_duplicate:
             self.stations[callsign_upper].packets_heard += 1
             # Track zero-hop packets separately
-            if hop_count == 0:
+            # NOTE: Third-party packets (igated from APRS-IS) should NEVER count as zero-hop
+            # even if the RF path from iGate to us was direct (hop_count=0)
+            if hop_count == 0 and not relay_call:
                 self.stations[callsign_upper].zero_hop_packet_count += 1
 
         # Update hop count to minimum observed
@@ -821,7 +830,9 @@ class APRSManager:
             self.stations[callsign_upper].hop_count = hop_count
 
         # Track if we've EVER heard with zero hops (direct, no digipeaters)
-        if hop_count == 0:
+        # NOTE: Third-party packets (igated from APRS-IS) should NEVER count as zero-hop
+        # even if the RF path from iGate to us was direct (hop_count=0)
+        if hop_count == 0 and not relay_call:
             self.stations[callsign_upper].heard_zero_hop = True
             self.stations[callsign_upper].last_heard_zero_hop = datetime.now(timezone.utc)
 
@@ -3259,10 +3270,12 @@ class APRSManager:
         """Get all stations heard with zero hops (direct RF, no digipeaters).
 
         Returns:
-            List of APRSStation objects with heard_zero_hop=True
+            List of APRSStation objects with heard_zero_hop=True and
+            zero_hop_packet_count > 0 (filters out stations from before
+            zero-hop packet counting was implemented)
         """
         return [station for station in self.stations.values()
-                if station.heard_zero_hop]
+                if station.heard_zero_hop and station.zero_hop_packet_count > 0]
 
     def get_digipeater_coverage(self) -> Dict[str, Dict]:
         """Get digipeater coverage data for mapping.

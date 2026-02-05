@@ -1466,6 +1466,10 @@ class CommandProcessor:
             else:
                 print_info(f"Frame buffer: {debug_buffer_mb} MB buffer, starting fresh at frame #1")
 
+        # Run database migrations (after APRS manager and frame history are initialized)
+        from src.migrations import run_startup_migrations
+        run_startup_migrations(self.aprs_manager, self)
+
         # GPS state
         self.gps_position = None  # Current GPS position from radio
         self.gps_locked = False  # GPS lock status
@@ -3147,6 +3151,9 @@ def parse_and_track_aprs_frame(complete_frame, radio):
             parse_call = source_call
             parse_info = inner_info
             result['relay'] = relay_call
+            # Third-party packets (igated from APRS-IS) should NEVER count as zero-hop
+            # Override hop_count to 999 (unknown/igated) regardless of RF path from iGate
+            result['hop_count'] = 999
         else:
             parse_call = result['src_call']
             parse_info = info_str
