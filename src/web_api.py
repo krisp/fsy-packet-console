@@ -9,8 +9,8 @@ from typing import Any, Dict, List, Optional
 
 from aiohttp import web
 
-from .aprs_manager import (
-    APRSManager,
+from .aprs_manager import APRSManager
+from .aprs.models import (
     APRSMessage,
     APRSPosition,
     APRSStation,
@@ -18,6 +18,7 @@ from .aprs_manager import (
     APRSTelemetry,
     APRSWeather,
 )
+from .aprs.geo_utils import maidenhead_to_latlon, calculate_dew_point
 
 
 def serialize_datetime(dt: Optional[datetime]) -> Optional[str]:
@@ -74,7 +75,7 @@ def serialize_weather(wx: Optional[APRSWeather]) -> Optional[Dict[str, Any]]:
     # Calculate dew point if we have temp and humidity
     dew_point = None
     if wx.temperature is not None and wx.humidity is not None:
-        dew_point = APRSManager.calculate_dew_point(wx.temperature, wx.humidity)
+        dew_point = calculate_dew_point(wx.temperature, wx.humidity)
 
     return {
         "timestamp": serialize_datetime(wx.timestamp),
@@ -167,6 +168,8 @@ def serialize_station(station: APRSStation, include_history: bool = False) -> Di
         "heard_direct": station.heard_direct,
         "hop_count": station.hop_count if station.hop_count != 999 else None,
         "heard_zero_hop": station.heard_zero_hop,
+        "zero_hop_packet_count": station.zero_hop_packet_count,
+        "last_heard_zero_hop": serialize_datetime(station.last_heard_zero_hop),
         "relay_paths": station.relay_paths[:5],  # Limit to recent 5
         "digipeater_path": station.digipeater_path,  # Complete digipeater path (legacy)
         "digipeater_paths": station.digipeater_paths,  # All unique paths observed
@@ -500,7 +503,7 @@ class APIHandlers:
             if mylocation:
                 try:
                     from src.aprs_manager import APRSManager
-                    lat, lon = APRSManager.maidenhead_to_latlon(mylocation)
+                    lat, lon = maidenhead_to_latlon(mylocation)
                     return web.json_response({
                         "locked": True,
                         "latitude": lat,

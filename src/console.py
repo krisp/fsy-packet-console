@@ -30,6 +30,9 @@ from prompt_toolkit.patch_stdout import patch_stdout
 
 from src import constants
 from src.aprs_manager import APRSManager
+from src.aprs.geo_utils import maidenhead_to_latlon
+from src.aprs.formatters import APRSFormatters
+from src.aprs.duplicate_detector import DuplicateDetector
 from src.ax25_adapter import AX25Adapter
 from src.device_id import get_device_identifier
 from src.constants import *
@@ -581,7 +584,7 @@ class TNCConfig:
                 from src.aprs_manager import APRSManager
                 try:
                     # Test if valid grid square by converting to lat/lon
-                    lat, lon = APRSManager.maidenhead_to_latlon(value)
+                    lat, lon = maidenhead_to_latlon(value)
                     # Verify we got sensible coordinates
                     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
                         print_error(f"Invalid grid square '{value}': coordinates out of range")
@@ -1562,7 +1565,7 @@ class CommandProcessor:
         """
         try:
             from src.aprs_manager import APRSManager
-            lat, lon = APRSManager.maidenhead_to_latlon(grid_square)
+            lat, lon = maidenhead_to_latlon(grid_square)
             if self.aprs_manager._web_broadcast:
                 await self.aprs_manager._web_broadcast('gps_update', {
                     'latitude': lat,
@@ -2767,7 +2770,7 @@ class CommandProcessor:
                 mylocation = self.tnc_config.get("MYLOCATION")
                 if mylocation:
                     try:
-                        lat, lon = APRSManager.maidenhead_to_latlon(mylocation)
+                        lat, lon = maidenhead_to_latlon(mylocation)
                         source = f"Grid {mylocation.upper()}"
                     except ValueError as e:
                         print_error(f"Invalid MYLOCATION '{mylocation}': {e}")
@@ -3149,11 +3152,11 @@ def parse_and_track_aprs_frame(complete_frame, radio):
             parse_info = info_str
 
         # Check for duplicate packet (suppresses digipeater copies)
-        result['is_duplicate'] = radio.aprs_manager.is_duplicate_packet(parse_call, parse_info)
+        result['is_duplicate'] = radio.aprs_manager.duplicate_detector.is_duplicate(parse_call, parse_info)
 
         # Record digipeater paths even for duplicates (improves coverage accuracy)
         if result['is_duplicate'] and result['digipeater_path']:
-            radio.aprs_manager.record_digipeater_path(parse_call, result['digipeater_path'])
+            radio.aprs_manager.duplicate_detector.record_path(parse_call, result['digipeater_path'])
 
         # Parse all APRS types (updates database in aprs_manager)
         # This happens even for duplicates to ensure tracking
@@ -3425,7 +3428,7 @@ async def tnc_monitor(tnc_queue, radio):
                         # MIC-E
                         if aprs['mic_e']:
                             mice_pos = aprs['mic_e']
-                            cleaned_comment = radio.aprs_manager.clean_position_comment(mice_pos.comment)
+                            cleaned_comment = APRSFormatters.clean_position_comment(mice_pos.comment)
                             relay_part = f" [📡 via {relay}]" if relay else ""
                             if cleaned_comment:
                                 print_info(
@@ -3443,7 +3446,7 @@ async def tnc_monitor(tnc_queue, radio):
                         # Object
                         elif aprs['object']:
                             obj_pos = aprs['object']
-                            cleaned_comment = radio.aprs_manager.clean_position_comment(obj_pos.comment)
+                            cleaned_comment = APRSFormatters.clean_position_comment(obj_pos.comment)
                             relay_part = f" [📡 via {relay}]" if relay else ""
                             if cleaned_comment:
                                 print_info(
@@ -3461,7 +3464,7 @@ async def tnc_monitor(tnc_queue, radio):
                         # Item
                         elif aprs['item']:
                             item_pos = aprs['item']
-                            cleaned_comment = radio.aprs_manager.clean_position_comment(item_pos.comment)
+                            cleaned_comment = APRSFormatters.clean_position_comment(item_pos.comment)
                             relay_part = f" [📡 via {relay}]" if relay else ""
                             if cleaned_comment:
                                 print_info(
@@ -3529,7 +3532,7 @@ async def tnc_monitor(tnc_queue, radio):
                                 print_info(f"🌤️  Weather update from {wx.station}{relay_part}", frame_num=frame_num, buffer_mode=buffer_mode)
                             elif pos:
                                 # Position only
-                                cleaned_comment = radio.aprs_manager.clean_position_comment(pos.comment)
+                                cleaned_comment = APRSFormatters.clean_position_comment(pos.comment)
                                 if cleaned_comment:
                                     print_info(
                                         f"📍 Position from {pos.station}{relay_part}: {pos.grid_square} - {cleaned_comment}",

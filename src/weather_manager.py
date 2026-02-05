@@ -382,13 +382,14 @@ class WeatherStationManager:
             solar_radiation=self._last_data.solar_radiation,          # Instantaneous
         )
 
-        print_debug(
-            f"Beacon weather (averaged over {beacon_interval_seconds}s): "
-            f"wind {avg_wind_speed:.1f}mph (avg of {len(wind_speeds)} readings), "
-            f"gust {peak_gust:.1f}mph (peak), "
-            f"dir {avg_direction}° (vector avg of {len(directions)} readings)",
-            level=2
-        )
+        if wind_speeds or gusts or directions:
+            print_debug(
+                f"Beacon weather (averaged over {beacon_interval_seconds}s): "
+                f"wind {avg_wind_speed:.1f}mph (avg of {len(wind_speeds)} readings), "
+                f"gust {peak_gust:.1f}mph (peak), "
+                f"dir {avg_direction}° (vector avg of {len(directions)} readings)",
+                level=2
+            )
 
         return beacon_weather
 

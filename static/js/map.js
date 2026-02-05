@@ -115,6 +115,32 @@ export class APRSMap {
     }
 
     /**
+     * Format relative time (e.g. "5m ago", "2h ago")
+     * @param {string|Date} timestamp - ISO timestamp string or Date object
+     * @returns {string} - Formatted relative time
+     */
+    formatRelativeTime(timestamp) {
+        const date = new Date(timestamp);
+        const now = new Date();
+        const diff = now - date;
+
+        // If less than 1 hour, show minutes ago
+        if (diff < 3600000) {
+            const minutes = Math.floor(diff / 60000);
+            return minutes === 0 ? 'Just now' : `${minutes}m ago`;
+        }
+
+        // If less than 24 hours, show hours ago
+        if (diff < 86400000) {
+            const hours = Math.floor(diff / 3600000);
+            return `${hours}h ago`;
+        }
+
+        // Otherwise show date and time
+        return date.toLocaleString();
+    }
+
+    /**
      * Validate that position is not at "Null Island" (0.0, 0.0)
      * @param {number} lat - Latitude
      * @param {number} lon - Longitude
@@ -335,6 +361,12 @@ export class APRSMap {
 
         if (pos.comment) {
             content += `${pos.comment}<br>`;
+        }
+
+        // Show last heard zero-hop timestamp for stations with heard_zero_hop=true
+        if (station.heard_zero_hop && station.last_heard_zero_hop) {
+            const zeroHopTime = this.formatRelativeTime(station.last_heard_zero_hop);
+            content += `<small style="color: #666;">Last heard zero-hop: ${zeroHopTime}</small><br>`;
         }
 
         if (station.has_weather && station.last_weather) {

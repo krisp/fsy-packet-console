@@ -54,14 +54,16 @@ def parse_ax25_frame(kiss_frame: bytes) -> Dict:
 
         if offset < len(payload):
             # Standard AX.25: I-frames and UI frames have PID byte
+            # U-frames without PID: SABM, DISC, UA, DM, FRMR (have control & 0x03 == 0x03 but aren't UI)
             if control is not None and (
-                (control & 0x01) == 0 or (control & 0x03) == 0x03
+                (control & 0x01) == 0  # I-frame: has PID
+                or (control == 0x03)  # UI frame specifically: has PID
             ):
-                # I-frame (bit 0 = 0) or UI frame (bits 0-1 = 11): has PID byte
+                # I-frame or UI frame: has PID byte
                 pid = payload[offset]
                 info = payload[offset + 1 :]
             else:
-                # Other frame types: no PID byte, info starts at offset
+                # Other frame types (S-frames, U-frames except UI): no PID byte, info starts at offset
                 info = payload[offset:]
 
         result["control"] = control

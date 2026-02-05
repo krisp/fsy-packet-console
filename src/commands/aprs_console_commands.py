@@ -5,9 +5,13 @@ Handles APRS message reading, weather station listing, station tracking,
 and database operations for the main console interface.
 """
 
+import os
+
 from .base import CommandHandler, command
 from src.utils import print_pt, print_info, print_error, print_header, print_warning
 from prompt_toolkit import HTML
+from src.aprs.formatters import APRSFormatters
+from src.aprs.geo_utils import latlon_to_maidenhead, maidenhead_to_latlon, calculate_distance_miles
 
 
 class APRSConsoleCommandHandler(CommandHandler):
@@ -40,6 +44,7 @@ class APRSConsoleCommandHandler(CommandHandler):
             print_info("  aprs wx list [last|name|temp|humidity|pressure] - List weather stations")
             print_info("  aprs position list                 - List station positions")
             print_info("  aprs station list [name|packets|last|hops] - List all heard stations (default: last)")
+            print_info("  aprs station dx                    - DX list (zero-hop stations by distance)")
             print_info("  aprs station show <callsign>       - Show detailed station info")
             print_info("  aprs database save                 - Manually save database to disk")
             print_info("  aprs database clear                - Clear entire APRS database")
@@ -227,10 +232,10 @@ class APRSConsoleCommandHandler(CommandHandler):
 
         # Table rows
         for station in weather_stations:
-            fmt = self.aprs_manager.format_weather(station)
+            fmt = APRSFormatters.format_weather(station)
             # Calculate grid from lat/lon if available
             if station.latitude and station.longitude:
-                grid = self.aprs_manager.latlon_to_maidenhead(station.latitude, station.longitude)
+                grid = latlon_to_maidenhead(station.latitude, station.longitude)
             else:
                 grid = "---"
             last_update = station.timestamp.strftime("%H:%M:%S")
@@ -258,7 +263,7 @@ class APRSConsoleCommandHandler(CommandHandler):
 
         # Table rows
         for position in positions:
-            fmt = self.aprs_manager.format_position(position)
+            fmt = APRSFormatters.format_position(position)
             last_update = position.timestamp.strftime("%H:%M:%S")
             print_pt(
                 f"{fmt['station']:<12} {fmt['latitude']:<10} {fmt['longitude']:<10} {fmt['grid']:<9} {fmt['symbol']:<7} {last_update:<12}"
@@ -267,18 +272,20 @@ class APRSConsoleCommandHandler(CommandHandler):
     async def _station_commands(self, args):
         """Handle station listing and detail commands."""
         if not args:
-            print_error("Usage: aprs station list  or  aprs station show <callsign>")
+            print_error("Usage: aprs station <list|dx|show> ...")
             return
 
         action = args[0].lower()
 
         if action == "list":
             await self._station_list(args[1:])
+        elif action == "dx":
+            await self._station_dx(args[1:])
         elif action == "show":
             await self._station_show(args[1:])
         else:
             print_error(f"Unknown station action: {action}")
-            print_error("Use: list, show")
+            print_error("Use: list, dx, show")
 
     async def _station_list(self, args):
         """List all heard stations."""
@@ -315,10 +322,85 @@ class APRSConsoleCommandHandler(CommandHandler):
 
         # Table rows
         for station in stations:
-            fmt = self.aprs_manager.format_station_table_row(station)
+            fmt = APRSFormatters.format_station_table_row(station)
             hops_str = "RF" if fmt["hops"] == 0 else str(fmt["hops"]) if fmt["hops"] < 999 else "?"
             print_pt(
                 f"{fmt['callsign']:<12} {fmt['grid']:<9} {fmt['temp']:<7} {fmt['last_heard']:<11} {fmt['packets']:<8} {hops_str:<4}"
+            )
+
+    async def _station_dx(self, args):
+        """Show DX list - zero-hop stations sorted by distance."""
+        # Get zero-hop stations
+        stations = self.aprs_manager.get_zero_hop_stations()
+
+        if not stations:
+            print_info("No zero-hop stations heard yet")
+            return
+
+        # Get our position from GPS or MYLOCATION
+        our_lat = None
+        our_lon = None
+
+        # Try GPS first
+        if self.cmd_processor.gps_position:
+            our_lat = self.cmd_processor.gps_position[0]
+            our_lon = self.cmd_processor.gps_position[1]
+        else:
+            # Fall back to MYLOCATION
+            mylocation = self.tnc_config.get("MYLOCATION")
+            if mylocation:
+                try:
+                    our_lat, our_lon = maidenhead_to_latlon(mylocation)
+                except ValueError:
+                    print_error(f"Invalid MYLOCATION: {mylocation}")
+                    return
+            else:
+                print_error("No GPS lock and MYLOCATION not configured")
+                print_info("Set your position with: config set MYLOCATION <grid>")
+                print_info("Example: config set MYLOCATION FN31pr")
+                return
+
+        # Calculate distances and filter stations with positions
+        dx_list = []
+        for station in stations:
+            if station.last_position:
+                distance = calculate_distance_miles(
+                    our_lat, our_lon,
+                    station.last_position.latitude,
+                    station.last_position.longitude
+                )
+                dx_list.append({
+                    'station': station,
+                    'distance': distance,
+                    'grid': station.last_position.grid_square
+                })
+
+        # Sort by distance descending (furthest first)
+        dx_list.sort(key=lambda x: x['distance'], reverse=True)
+
+        # Show header
+        print_header(f"DX List - Zero-Hop Stations ({len(dx_list)})")
+
+        if not dx_list:
+            print_info("Zero-hop stations heard but none have position data")
+            return
+
+        # Table header
+        print_pt(HTML("<b>Callsign     Grid      Distance  Last Heard  Zero-Hop Packets</b>"))
+        print_pt(HTML("<gray>──────────────────────────────────────────────────────────────</gray>"))
+
+        # Table rows
+        for item in dx_list:
+            station = item['station']
+            distance = item['distance']
+            last_heard = station.last_heard.strftime("%H:%M:%S")
+
+            # Format distance with proper units
+            distance_str = f"{distance:.1f} mi"
+
+            print_pt(
+                f"{station.callsign:<12} {item['grid']:<9} {distance_str:<9} "
+                f"{last_heard:<11} {station.zero_hop_packet_count:<16}"
             )
 
     async def _station_show(self, args):
@@ -342,7 +424,7 @@ class APRSConsoleCommandHandler(CommandHandler):
             threshold = float(self.tnc_config.get("WXTREND"))
         except (ValueError, TypeError):
             threshold = 0.3  # Default fallback
-        detail = self.aprs_manager.format_station_detail(station, pressure_threshold=threshold)
+        detail = APRSFormatters.format_station_detail(station, pressure_threshold=threshold)
         print_pt(detail)
 
     async def _database_commands(self, args):
@@ -374,7 +456,6 @@ class APRSConsoleCommandHandler(CommandHandler):
             # Get file size
             db_file = self.aprs_manager.db_file
             try:
-                import os
                 size = os.path.getsize(db_file)
                 size_kb = size / 1024
                 print_info(f"✓ Saved {count} station(s) to {db_file}")

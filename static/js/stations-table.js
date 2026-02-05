@@ -8,6 +8,7 @@ let api = new APRSApi();
 let stationsData = [];
 let currentSort = { column: 'callsign', ascending: true };
 let searchFilter = '';
+let dxOnlyFilter = false;
 let sse = null;
 
 /**
@@ -21,6 +22,7 @@ async function init() {
     // Setup event listeners
     setupSortHandlers();
     setupSearchHandler();
+    setupDXOnlyFilterHandler();
     setupRefreshHandler();
     setupMessageClickHandler();
 
@@ -133,6 +135,18 @@ function setupSearchHandler() {
 }
 
 /**
+ * Setup DX Only filter handler
+ */
+function setupDXOnlyFilterHandler() {
+    const checkbox = document.getElementById('filter-dx-only');
+    checkbox.addEventListener('change', (e) => {
+        dxOnlyFilter = e.target.checked;
+        renderTable();
+        updateTableInfo();
+    });
+}
+
+/**
  * Setup refresh button handler
  */
 function setupRefreshHandler() {
@@ -226,6 +240,13 @@ function getSortedFilteredStations() {
         );
     }
 
+    // Apply DX Only filter (heard_zero_hop = true)
+    if (dxOnlyFilter) {
+        filtered = filtered.filter(station =>
+            station.heard_zero_hop === true
+        );
+    }
+
     // Sort
     const sorted = [...filtered].sort((a, b) => {
         const aVal = getSortValue(a, currentSort.column);
@@ -293,8 +314,17 @@ function updateTableInfo() {
     const total = stationsData.length;
 
     let info = `Showing ${filtered.length} of ${total} stations`;
+    const activeFilters = [];
+
     if (searchFilter) {
-        info += ` (filtered by "${searchFilter}")`;
+        activeFilters.push(`"${searchFilter}"`);
+    }
+    if (dxOnlyFilter) {
+        activeFilters.push('DX Only');
+    }
+
+    if (activeFilters.length > 0) {
+        info += ` (filtered by ${activeFilters.join(', ')})`;
     }
 
     document.getElementById('table-info').textContent = info;

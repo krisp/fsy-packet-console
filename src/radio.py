@@ -8,6 +8,7 @@ import asyncio
 from datetime import datetime
 from src.utils import print_debug, print_error, print_warning
 from src.constants import *
+from src.aprs.geo_utils import maidenhead_to_latlon
 from src.protocol import (
     wrap_kiss,
     build_message,
@@ -445,8 +446,7 @@ class RadioController:
             mylocation = tnc_config.get("MYLOCATION")
             if mylocation:
                 try:
-                    from src.aprs_manager import APRSManager
-                    lat, lon = APRSManager.maidenhead_to_latlon(mylocation)
+                    lat, lon = maidenhead_to_latlon(mylocation)
                     return (lat, lon, f"Grid {mylocation.upper()}")
                 except ValueError:
                     pass

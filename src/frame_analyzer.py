@@ -845,8 +845,8 @@ def format_frame_detailed(
 
             # Grid square calculation (if available)
             try:
-                from src.aprs_manager import APRSManager
-                grid = APRSManager.latlon_to_maidenhead(details['latitude'], details['longitude'])
+                from src.aprs.geo_utils import latlon_to_maidenhead
+                grid = latlon_to_maidenhead(details['latitude'], details['longitude'])
                 if output_format == 'ansi':
                     lines.append(f"    Grid Square: {Colors.CYAN}{grid}{Colors.RESET}")
                 else:

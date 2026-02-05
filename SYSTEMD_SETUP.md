@@ -13,7 +13,8 @@ The easiest way to install the service is using the provided installation script
 The script will:
 - Auto-detect your Python environment (virtual environment or system Python)
 - Auto-detect paths and user settings
-- Create a customized service file for your system
+- **Prompt for TNC transport configuration** (BLE, Serial KISS, or KISS-over-TCP)
+- Create a customized service file with your specific transport settings
 - Install it to `/etc/systemd/system/fsy-console.service`
 - Optionally enable auto-start on boot
 - Optionally start the service immediately
@@ -28,11 +29,25 @@ FSY Packet Console - Service Installer
 
 ✓ Found virtual environment: ~/venv
 
+TNC Transport Configuration
+===========================
+Select your TNC connection type:
+  1) BLE (Bluetooth Low Energy) - default
+  2) Serial KISS TNC (e.g., /dev/ttyUSB0)
+  3) KISS-over-TCP (e.g., Direwolf)
+
+Select option [1-3, default: 1]: 3
+
+Enter KISS TNC host (e.g., localhost or 192.168.1.100): localhost
+Enter KISS TNC port [default: 8001]: 8001
+✓ Configured for KISS-over-TCP: localhost:8001
+
 Configuration:
   User:              dave
   Home Directory:    /home/dave
   Project Directory: /home/dave/mnt/fsy-packet-console
   Python Executable: /home/dave/venv/bin/python
+  Command Arguments: -l -k localhost:8001
 
 Install service with these settings? [y/N] y
 
@@ -46,7 +61,50 @@ Enable auto-start on boot? [y/N] y
 
 Start the service now? [y/N] y
 ✓ Service started
+
+Service status:
+● fsy-console.service - FSY Packet Console - APRS TNC and Web UI
+     Loaded: loaded (/etc/systemd/system/fsy-console.service; enabled; preset: enabled)
+     Active: active (running) since Wed 2026-02-05 14:30:22 UTC; 1s ago
+   Main PID: 54321 (screen)
+      Tasks: 3 (limit: 4915)
+     Memory: 52.3M
+     CPU: 0.145s
+   CGroup: /system.slice/fsy-console.service
+           └─54321 /usr/bin/screen -dmS fsy-console /home/dave/venv/bin/python main.py -l -k localhost:8001
+
+==========================================
+Installation Complete!
+==========================================
+
+Useful commands:
+  Start:   sudo systemctl start fsy-console.service
+  Stop:    sudo systemctl stop fsy-console.service
+  Status:  systemctl status fsy-console.service
+  Logs:    journalctl -u fsy-console.service -f
+  Attach:  screen -r fsy-console
+
+See SYSTEMD_SETUP.md for detailed documentation.
 ```
+
+### Transport Configuration Options
+
+The installer will prompt you to choose your TNC connection method:
+
+#### Option 1: BLE (Bluetooth Low Energy) - Default
+- Automatically discovers and connects to Bluetooth radio
+- MAC address optional (can be configured later in console)
+- Best for portable/mobile setups
+
+#### Option 2: Serial KISS TNC
+- Direct serial connection (e.g., /dev/ttyUSB0)
+- Requires TNC hardware with KISS protocol support
+- Specify baud rate (default: 9600)
+
+#### Option 3: KISS-over-TCP
+- Remote TNC via network (e.g., Direwolf on another machine)
+- Specify host and port
+- Best for fixed installations with remote TNC server
 
 ## Basic Usage
 
@@ -121,12 +179,47 @@ sudo systemctl disable fsy-console.service
 
 ## Graceful Shutdown
 
-The service is configured with a 15-second timeout for graceful shutdown (`TimeoutStopSec=15`). This is important for:
-- **Bluetooth cleanup**: Allows time to properly disconnect from the radio
-- **Database saving**: Ensures APRS station data is saved
-- **Frame buffer**: Saves frame history to disk
+The service is configured with advanced graceful shutdown handling. Here's how it works:
 
-When you stop the service, the console receives a SIGTERM signal and performs orderly shutdown before the connection is terminated.
+### Shutdown Sequence
+
+1. **systemctl stop** is called
+2. **ExecStop** script runs:
+   - Finds the Python process (child of screen)
+   - Sends SIGTERM signal to Python (not screen)
+3. **Python receives SIGTERM**:
+   - Converts to SIGINT internally
+   - Triggers KeyboardInterrupt handler
+   - Initiates graceful shutdown
+4. **Graceful shutdown performs** (30-second timeout):
+   - **Bluetooth cleanup**: Properly disconnects from radio
+   - **Database saving**: Flushes APRS station data to disk
+   - **Frame buffer**: Saves frame history to file
+   - **Port cleanup**: Releases AGWPE, TNC, and Web UI ports
+   - **Resource cleanup**: Closes all connections and files
+5. **Screen session persists** (important):
+   - Screen itself is NOT terminated
+   - Only the Python process exits
+   - This prevents abrupt loss of connectivity
+6. **Timeout enforcement** (`TimeoutStopSec=30`):
+   - After 30 seconds, systemd forcibly kills remaining processes
+   - Normally not needed (Python finishes in <5 seconds)
+   - Acts as safety net for stuck cleanup operations
+
+### Why This Approach?
+
+The previous design (`ExecStop=/usr/bin/screen -S fsy-console -X quit`) would:
+- ❌ Send SIGTERM to screen, not Python
+- ❌ Force screen to exit immediately
+- ❌ Abruptly kill Python without cleanup
+- ❌ Leave ports bound, frame buffer unflushed
+
+The new design:
+- ✅ Sends signals to Python directly
+- ✅ Allows SIGINT handler to run
+- ✅ Completes all cleanup operations
+- ✅ Safely releases all resources
+- ✅ Screen exits cleanly after Python finishes
 
 ## Advanced Configuration
 
@@ -145,13 +238,19 @@ Common issues:
 
 ### Reinstalling or Updating Service
 
-If you move the project directory or change Python environments, simply re-run the installation script:
+If you move the project directory, change Python environments, or need to change your TNC transport configuration, simply re-run the installation script:
 
 ```bash
 ./install-service.sh
 ```
 
-The script will detect the new configuration and update the service file automatically.
+The script will:
+1. Detect the new configuration (Python env, paths)
+2. Prompt for transport mode again (BLE, Serial, TCP)
+3. Create an updated service file
+4. Reload systemd and restart the service
+
+**Note**: The old service file will be replaced with the new configuration.
 
 ### Manual Service File Editing
 
@@ -287,10 +386,36 @@ If you see timeout warnings during shutdown:
 
 ## Logs and Monitoring
 
+### Logging Features
+
+The service is configured with automatic logging enabled (`-l` flag):
+- Console output is sent to **both** the screen session AND a log file
+- Log file location: `~/.local/share/fsy-packet-console/logs/` (by default)
+- Journalctl captures all systemd/stdio output separately
+- Dual logging provides redundancy and searchability
+
 ### Check Last 5 Minutes of Logs
 
 ```bash
 journalctl -u fsy-console.service --since "5 minutes ago"
+```
+
+### Check Local Log File
+
+```bash
+# View logs from the local log file (with -l flag)
+tail -f ~/.local/share/fsy-packet-console/logs/fsy-packet-console.log
+```
+
+### Combine Journalctl and Local Logs
+
+For comprehensive debugging:
+```bash
+# Follow journalctl
+journalctl -u fsy-console.service -f
+
+# In another terminal, follow local logs
+tail -f ~/.local/share/fsy-packet-console/logs/fsy-packet-console.log
 ```
 
 ### Monitor CPU and Memory Usage
@@ -312,13 +437,18 @@ journalctl -u fsy-console.service > fsy-console-logs.txt
 ## Benefits of Using Systemd Service
 
 ✅ **Auto-start on boot**: Console starts automatically after system reboot
-✅ **Auto-restart**: Restarts if process crashes
-✅ **Graceful shutdown**: 15-second timeout for clean Bluetooth disconnection
-✅ **Centralized logging**: Logs go to journalctl (searchable, timestamped)
-✅ **Easy control**: Standard systemctl commands
-✅ **Screen session**: Interactive access via `screen -r`
+✅ **Auto-restart**: Restarts if process crashes (10-second delay prevents thrashing)
+✅ **Graceful shutdown**: 30-second timeout with SIGINT-based cleanup
+✅ **Transport flexibility**: Configure BLE, Serial KISS, or KISS-over-TCP at install time
+✅ **Smart signal handling**: Sends SIGTERM directly to Python (not screen)
+✅ **Logging enabled**: Console runs with `-l` flag for automatic log file output
+✅ **Centralized logging**: All output goes to journalctl (searchable, timestamped)
+✅ **Easy control**: Standard systemctl commands work seamlessly
+✅ **Screen session**: Interactive access via `screen -r fsy-console`
 ✅ **System integration**: Works with system boot order (After=network.target)
-✅ **Auto-configuration**: Installation script detects paths and Python environment
+✅ **Auto-configuration**: Installation script detects paths, Python env, and transport settings
+✅ **Resource limits**: Pre-configured for high file descriptor and process counts
+✅ **Process isolation**: Logging and syslog identification for easy troubleshooting
 
 ## Testing the Setup
 
@@ -388,23 +518,76 @@ Wants=network-online.target
 Type=forking
 User=<your-user>
 WorkingDirectory=<project-directory>
-ExecStart=/usr/bin/screen -dmS fsy-console <python-path> main.py
-ExecStop=/usr/bin/screen -S fsy-console -X quit
-TimeoutStopSec=15         # 15 seconds for graceful shutdown
+
+# Start the console in a screen session with configured transport options
+ExecStart=/usr/bin/screen -dmS fsy-console <python-path> main.py <options>
+
+# Graceful shutdown: Find Python process (child of screen) and send SIGTERM
+# Python's SIGTERM handler converts it to SIGINT internally for graceful cleanup
+ExecStop=/bin/bash -c 'PYTHON_PID=$(pgrep --parent $MAINPID); [ -n "$PYTHON_PID" ] && kill -TERM $PYTHON_PID'
+
+# Don't let systemd send signals - ExecStop handles it
+# This prevents screen from receiving SIGTERM (which causes immediate exit)
+KillMode=none
+
+# Allow 30 seconds for graceful shutdown before SIGKILL
+TimeoutStopSec=30
+
+# Restart on failure
 Restart=on-failure
 RestartSec=10
-KillMode=process
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fsy-console
+
+# Process limits
+LimitNOFILE=65536
+LimitNPROC=4096
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-Key points:
-- **Type=forking**: Screen creates a background daemon process
-- **TimeoutStopSec=15**: Allows time for Bluetooth cleanup before forced termination
-- **Restart=on-failure**: Auto-restarts if console crashes
-- **KillMode=process**: Only kills the main process (screen), not child processes
-- **After=network.target**: Waits for network before starting (important for KISS-over-TCP mode)
+### Configuration Details
+
+**Type=forking**: Screen creates a background daemon process
+
+**ExecStart with Transport Options**:
+- `-l`: Always enables logging to file
+- `-r <MAC>`: BLE mode with optional Bluetooth MAC address
+- `-s <PORT> -b <BAUD>`: Serial KISS TNC mode (e.g., `/dev/ttyUSB0` @ 9600 baud)
+- `-k <HOST>:<PORT>`: KISS-over-TCP mode (e.g., `localhost:8001` for Direwolf)
+
+**ExecStop with Graceful Shutdown**:
+- Finds Python child process of screen
+- Sends SIGTERM (converted to SIGINT internally)
+- Allows ordered shutdown without abrupt termination
+- No screen-level signals sent (prevents forced exit)
+
+**KillMode=none**:
+- Systemd doesn't send any signals to the process group
+- Only ExecStop command is used for shutdown
+- Prevents screen from being forcibly terminated mid-cleanup
+
+**TimeoutStopSec=30**:
+- 30-second timeout for graceful shutdown (up from 15)
+- Allows time for:
+  - Bluetooth disconnect sequence
+  - Database/frame buffer saving
+  - Network connection cleanup
+  - Port/resource cleanup
+
+**Restart=on-failure**: Auto-restarts if console crashes with 10-second delay
+
+**StandardOutput=journal & StandardError=journal**: All output goes to systemd journal (searchable)
+
+**Process Limits**:
+- `LimitNOFILE=65536`: Allow up to 65k open file descriptors (for frame buffer)
+- `LimitNPROC=4096`: Allow up to 4k processes/threads per user
+
+**After=network.target**: Waits for network before starting (important for KISS-over-TCP mode)
 
 ## Notes
 
