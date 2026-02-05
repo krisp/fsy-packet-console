@@ -61,6 +61,12 @@ def parse_input_line(line):
     return None
 
 
+def strip_ansi_codes(text):
+    """Strip ANSI escape codes from text."""
+    import re
+    return re.sub(r'\x1b\[[0-9;]*m', '', text)
+
+
 def load_frame_buffer(buffer_file=None):
     """
     Load frames from the frame buffer database.
@@ -117,8 +123,7 @@ def analyze_frame(frame_num, timestamp, byte_count, frame_hex, direction='RX', u
 
     # Strip ANSI codes if not outputting to a TTY
     if not use_colors:
-        import re
-        output = re.sub(r'\x1b\[[0-9;]*m', '', output)
+        output = strip_ansi_codes(output)
 
     # Track ACKs
     is_ack = (decoded.get('aprs') and
@@ -215,10 +220,7 @@ Examples:
         # Load from buffer database
         # Helper to strip colors if needed
         def format_output(text):
-            if not use_colors:
-                import re
-                text = re.sub(r'\x1b\[[0-9;]*m', '', text)
-            return text
+            return strip_ansi_codes(text) if not use_colors else text
 
         header = f"{Colors.BOLD}KISS/AX.25/APRS Protocol Analyzer{Colors.RESET}"
         print(format_output(header))
@@ -259,12 +261,19 @@ Examples:
                     # Get payload preview (first 40 chars)
                     if decoded.get('info'):
                         payload_text = decoded['info']['text']
+                        # Sanitize to printable ASCII + common Unicode when piping
+                        # Remove control characters and invalid UTF-8
+                        if not use_colors:
+                            # Strip non-printable characters
+                            payload_text = ''.join(c if (c.isprintable() or c.isspace()) else '?' for c in payload_text)
                         payload_preview = payload_text[:40] + '...' if len(payload_text) > 40 else payload_text
                     else:
                         payload_preview = "(no info field)"
 
                 # Format output as single line
-                line = f"  [{direction}] Frame {frame_num:5d}: {timestamp} ({byte_count:4s}b) {Colors.GREEN}{from_call:12}{Colors.RESET} → {Colors.GREEN}{to_call:12}{Colors.RESET} {Colors.MAGENTA}{payload_preview}{Colors.RESET}"
+                # Use ASCII arrow when not in TTY to avoid UTF-8 issues with grep
+                arrow = "→" if use_colors else "->"
+                line = f"  [{direction}] Frame {frame_num:5d}: {timestamp} ({byte_count:4s}b) {Colors.GREEN}{from_call:12}{Colors.RESET} {arrow} {Colors.GREEN}{to_call:12}{Colors.RESET} {Colors.MAGENTA}{payload_preview}{Colors.RESET}"
                 print(format_output(line))
             print()
             return
@@ -318,8 +327,12 @@ Examples:
 
     else:
         # Original stdin mode
-        print(f"{Colors.BOLD}KISS/AX.25/APRS Protocol Analyzer{Colors.RESET}")
-        print(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}")
+        # Helper to strip colors if needed (same as buffer mode)
+        def format_output(text):
+            return strip_ansi_codes(text) if not use_colors else text
+
+        print(format_output(f"{Colors.BOLD}KISS/AX.25/APRS Protocol Analyzer{Colors.RESET}"))
+        print(format_output(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}"))
         print()
         print("Paste your frame capture below (one frame per line).")
         print()
@@ -329,7 +342,7 @@ Examples:
         print("  c00092884040...  (raw hex)")
         print()
         print("Press Ctrl+D (Linux/Mac) or Ctrl+Z then Enter (Windows) when done.")
-        print(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}")
+        print(format_output(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}"))
         print()
 
         frames_analyzed = 0
@@ -343,7 +356,8 @@ Examples:
 
                 parsed = parse_input_line(line)
                 if not parsed:
-                    print(f"{Colors.YELLOW}Warning: Could not parse line: {line[:60]}...{Colors.RESET}")
+                    warning = f"{Colors.YELLOW}Warning: Could not parse line: {line[:60]}...{Colors.RESET}"
+                    print(format_output(warning))
                     continue
 
                 frame_num, timestamp, byte_count, frame_hex = parsed
@@ -359,9 +373,15 @@ Examples:
 
     # Summary
     print()
-    print(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}")
-    print(f"{Colors.BOLD}Analysis Summary{Colors.RESET}")
-    print(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}")
+    # Use strip_ansi_codes directly for summary since format_output may not be in scope
+    if use_colors:
+        print(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}")
+        print(f"{Colors.BOLD}Analysis Summary{Colors.RESET}")
+        print(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}")
+    else:
+        print("=" * 80)
+        print("Analysis Summary")
+        print("=" * 80)
     print(f"Frames analyzed: {frames_analyzed}")
 
 if __name__ == '__main__':
