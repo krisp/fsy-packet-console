@@ -91,7 +91,8 @@ def load_frame_buffer(buffer_file=None):
         frames = []
         for frame_data in data.get('frames', []):
             frame_num = frame_data['frame_number']
-            timestamp = datetime.fromisoformat(frame_data['timestamp']).strftime('%H:%M:%S.%f')[:-3]
+            # Include full date and time (YYYY-MM-DD HH:MM:SS.mmm format)
+            timestamp = datetime.fromisoformat(frame_data['timestamp']).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
             raw_bytes = base64.b64decode(frame_data['raw_bytes'])
             frame_hex = raw_bytes.hex()
             byte_count = str(len(raw_bytes))
@@ -205,6 +206,18 @@ Examples:
         help='When to use colors (default: auto - disable if piping)'
     )
 
+    parser.add_argument(
+        '--wide', '-w',
+        action='store_true',
+        help='Wide mode: show full payload instead of truncating to 40 chars (use with -l)'
+    )
+
+    parser.add_argument(
+        '--truncate', '-t',
+        action='store_true',
+        help='Force truncation to 40 chars even when piped (opposite of default piped behavior)'
+    )
+
     args = parser.parse_args()
 
     # Determine whether to use colors
@@ -214,6 +227,17 @@ Examples:
         use_colors = False
     else:  # auto
         use_colors = sys.stdout.isatty()
+
+    # Determine whether to show full payload (wide mode)
+    # Default: wide mode when piped, truncate when in terminal
+    # Can be overridden with -w (force wide) or -t (force truncate)
+    is_tty = sys.stdout.isatty()
+    if args.wide:
+        wide_mode = True
+    elif args.truncate:
+        wide_mode = False
+    else:  # auto
+        wide_mode = not is_tty  # Wide when piped, truncate in terminal
 
     # Determine source of frames
     if args.buffer or args.buffer_file or args.frames or args.range or args.list:
@@ -258,7 +282,7 @@ Examples:
                     from_call = decoded['ax25']['source']['full']
                     to_call = decoded['ax25']['destination']['full']
 
-                    # Get payload preview (first 40 chars)
+                    # Get payload preview (full text if wide_mode, otherwise first 40 chars)
                     if decoded.get('info'):
                         payload_text = decoded['info']['text']
                         # Sanitize to printable ASCII + common Unicode when piping
@@ -266,7 +290,12 @@ Examples:
                         if not use_colors:
                             # Strip non-printable characters
                             payload_text = ''.join(c if (c.isprintable() or c.isspace()) else '?' for c in payload_text)
-                        payload_preview = payload_text[:40] + '...' if len(payload_text) > 40 else payload_text
+
+                        # Show full payload in wide mode, truncate otherwise
+                        if wide_mode:
+                            payload_preview = payload_text
+                        else:
+                            payload_preview = payload_text[:40] + '...' if len(payload_text) > 40 else payload_text
                     else:
                         payload_preview = "(no info field)"
 
