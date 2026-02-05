@@ -6,7 +6,7 @@ Handles automatic and manual APRS position beacon transmission.
 
 from .base import CommandHandler, command
 from src.utils import print_pt, print_info, print_error
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class BeaconCommandHandler(CommandHandler):
@@ -44,7 +44,7 @@ class BeaconCommandHandler(CommandHandler):
 
             # Show last beacon time
             if self.cmd_processor.last_beacon_time:
-                elapsed = (datetime.now() - self.cmd_processor.last_beacon_time).total_seconds()
+                elapsed = (datetime.now(timezone.utc) - self.cmd_processor.last_beacon_time).total_seconds()
                 elapsed_min = int(elapsed // 60)
                 elapsed_sec = int(elapsed % 60)
                 time_str = self.cmd_processor.last_beacon_time.strftime("%H:%M:%S")

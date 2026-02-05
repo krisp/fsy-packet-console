@@ -5,7 +5,7 @@ This module provides a standalone `RadioController` used by the
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from src.utils import print_debug, print_error, print_warning
 from src.constants import *
 from src.aprs.geo_utils import maidenhead_to_latlon
@@ -42,8 +42,8 @@ class RadioController:
         self.tnc_queue = tnc_queue
         self.running = True
         self.tnc_bridge = None
-        self.last_tnc_packet = datetime.now()
-        self.last_heartbeat = datetime.now()
+        self.last_tnc_packet = datetime.now(timezone.utc)
+        self.last_heartbeat = datetime.now(timezone.utc)
         self.tnc_packet_count = 0
         self.heartbeat_failures = 0
         # KISS callback (AX25Adapter registers here)
@@ -86,11 +86,11 @@ class RadioController:
             return None
 
     def update_tnc_activity(self):
-        self.last_tnc_packet = datetime.now()
+        self.last_tnc_packet = datetime.now(timezone.utc)
         self.tnc_packet_count += 1
 
     def get_tnc_idle_time(self):
-        return (datetime.now() - self.last_tnc_packet).total_seconds()
+        return (datetime.now(timezone.utc) - self.last_tnc_packet).total_seconds()
 
     async def check_connection_health(self):
         """Check connection health (BLE only).
@@ -122,7 +122,7 @@ class RadioController:
                     f"Heartbeat OK - RSSI: {status.get('rssi', 0)}/15", level=6
                 )
 
-            self.last_heartbeat = datetime.now()
+            self.last_heartbeat = datetime.now(timezone.utc)
             return True
         except Exception as e:
             print_error(f"Health check failed: {e}")

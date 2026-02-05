@@ -4,7 +4,7 @@ Provides JSON serialization for APRS data structures and HTTP request handlers
 for the web interface.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from aiohttp import web
@@ -284,7 +284,7 @@ class APIHandlers:
         cutoff_datetime = None
         if cutoff_time is not None:
             try:
-                cutoff_datetime = datetime.fromtimestamp(cutoff_time)
+                cutoff_datetime = datetime.fromtimestamp(cutoff_time, tz=timezone.utc)
             except (ValueError, OSError):
                 raise web.HTTPBadRequest(text="Invalid cutoff_time timestamp")
 
@@ -433,7 +433,7 @@ class APIHandlers:
 
     async def handle_get_status(self, request: web.Request) -> web.Response:
         """GET /api/status - Get system status."""
-        uptime = datetime.now() - self.start_time
+        uptime = datetime.now(timezone.utc) - self.start_time
 
         return web.json_response({
             "mycall": self.get_mycall(),

@@ -281,7 +281,7 @@ class FrameHistory:
         """
         self.frame_counter += 1
         entry = FrameHistoryEntry(
-            timestamp=datetime.now(),
+            timestamp=datetime.now().astimezone(),  # Timezone-aware in local timezone
             direction=direction,
             raw_bytes=raw_bytes,
             frame_number=self.frame_counter
@@ -446,8 +446,14 @@ class FrameHistory:
             corrupted = 0
             for frame_data in data.get('frames', []):
                 try:
+                    # Load timestamp and make timezone-aware if needed
+                    ts = datetime.fromisoformat(frame_data['timestamp'])
+                    if ts.tzinfo is None:
+                        # Naive timestamp from old data - assume local time
+                        ts = ts.replace(tzinfo=datetime.now().astimezone().tzinfo)
+
                     entry = FrameHistoryEntry(
-                        timestamp=datetime.fromisoformat(frame_data['timestamp']),
+                        timestamp=ts,
                         direction=frame_data['direction'],
                         raw_bytes=base64.b64decode(frame_data['raw_bytes']),
                         frame_number=frame_data['frame_number']
@@ -3022,7 +3028,7 @@ def is_duplicate_packet(src_call: str, info: str) -> bool:
     return False
 
 
-def parse_and_track_aprs_frame(complete_frame, radio):
+def parse_and_track_aprs_frame(complete_frame, radio, timestamp=None, frame_number=None):
     """Parse APRS frame and update database tracking.
 
     This function runs in ALL modes (TNC and non-TNC) to ensure
@@ -3031,6 +3037,8 @@ def parse_and_track_aprs_frame(complete_frame, radio):
     Args:
         complete_frame: Complete KISS frame bytes
         radio: RadioController instance
+        timestamp: Optional timestamp for the frame (used by migrations to preserve historical timestamps)
+        frame_number: Optional frame buffer reference number
 
     Returns:
         dict with:
@@ -3159,11 +3167,13 @@ def parse_and_track_aprs_frame(complete_frame, radio):
             parse_info = info_str
 
         # Check for duplicate packet (suppresses digipeater copies)
-        result['is_duplicate'] = radio.aprs_manager.duplicate_detector.is_duplicate(parse_call, parse_info)
+        # Convert datetime timestamp to unix timestamp for duplicate detection
+        timestamp_float = timestamp.timestamp() if timestamp else None
+        result['is_duplicate'] = radio.aprs_manager.duplicate_detector.is_duplicate(parse_call, parse_info, timestamp_float)
 
         # Record digipeater paths even for duplicates (improves coverage accuracy)
         if result['is_duplicate'] and result['digipeater_path']:
-            radio.aprs_manager.duplicate_detector.record_path(parse_call, result['digipeater_path'])
+            radio.aprs_manager.duplicate_detector.record_path(parse_call, result['digipeater_path'], timestamp=timestamp_float)
 
         # Parse all APRS types (updates database in aprs_manager)
         # This happens even for duplicates to ensure tracking
@@ -3171,54 +3181,54 @@ def parse_and_track_aprs_frame(complete_frame, radio):
             # MIC-E
             result['aprs_types']['mic_e'] = radio.aprs_manager.parse_aprs_mice(
                 parse_call, result['dst_call'], parse_info, result['relay'],
-                result['hop_count'], result['digipeater_path']
+                result['hop_count'], result['digipeater_path'], timestamp=timestamp, frame_number=frame_number
             )
 
             # Object
             if not result['aprs_types']['mic_e']:
                 result['aprs_types']['object'] = radio.aprs_manager.parse_aprs_object(
                     parse_call, parse_info, result['relay'],
-                    result['hop_count'], result['digipeater_path']
+                    result['hop_count'], result['digipeater_path'], timestamp=timestamp, frame_number=frame_number
                 )
 
             # Item
             if not result['aprs_types']['object']:
                 result['aprs_types']['item'] = radio.aprs_manager.parse_aprs_item(
                     parse_call, parse_info, result['relay'],
-                    result['hop_count'], result['digipeater_path']
+                    result['hop_count'], result['digipeater_path'], timestamp=timestamp, frame_number=frame_number
                 )
 
             # Status
             if not result['aprs_types']['item']:
                 result['aprs_types']['status'] = radio.aprs_manager.parse_aprs_status(
                     parse_call, parse_info, result['relay'],
-                    result['hop_count'], result['digipeater_path']
+                    result['hop_count'], result['digipeater_path'], timestamp=timestamp, frame_number=frame_number
                 )
 
             # Telemetry
             if not result['aprs_types']['status']:
                 result['aprs_types']['telemetry'] = radio.aprs_manager.parse_aprs_telemetry(
                     parse_call, parse_info, result['relay'],
-                    result['hop_count'], result['digipeater_path']
+                    result['hop_count'], result['digipeater_path'], timestamp=timestamp, frame_number=frame_number
                 )
 
             # Message
             if not result['aprs_types']['telemetry']:
                 result['aprs_types']['message'] = radio.aprs_manager.parse_aprs_message(
                     parse_call, parse_info, result['relay'],
-                    result['hop_count'], result['digipeater_path']
+                    result['hop_count'], result['digipeater_path'], timestamp=timestamp, frame_number=frame_number
                 )
 
             # Weather and Position (can coexist)
             if not result['aprs_types']['message']:
                 result['aprs_types']['weather'] = radio.aprs_manager.parse_aprs_weather(
                     parse_call, parse_info, result['relay'],
-                    result['hop_count'], result['digipeater_path']
+                    result['hop_count'], result['digipeater_path'], timestamp=timestamp, frame_number=frame_number
                 )
                 result['aprs_types']['position'] = radio.aprs_manager.parse_aprs_position(
                     parse_call, parse_info, result['relay'],
                     result['hop_count'], result['digipeater_path'],
-                    result['dst_call']
+                    result['dst_call'], timestamp=timestamp, frame_number=frame_number
                 )
 
     except Exception as e:

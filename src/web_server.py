@@ -9,7 +9,7 @@ import json
 import os
 import time
 import zlib
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional, Set
 
@@ -42,7 +42,7 @@ class WebServer:
         self.runner = None
         self.site = None
         self.sse_queues: Set[asyncio.Queue] = set()
-        self.start_time = datetime.now()
+        self.start_time = datetime.now(timezone.utc)
 
         # Static file directory
         self.static_dir = Path(__file__).parent.parent / 'static'

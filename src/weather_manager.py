@@ -8,7 +8,7 @@ Supports both network-based (HTTP/TCP) and serial-based weather stations.
 
 import asyncio
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from src.utils import print_debug, print_error, print_info
@@ -237,7 +237,7 @@ class WeatherStationManager:
                 data = await self.get_current_weather()
                 if data:
                     self._last_data = data
-                    self._last_update = datetime.now()
+                    self._last_update = datetime.now(timezone.utc)
 
                     # Add to history for wind averaging
                     self._weather_history.append(data)
@@ -319,7 +319,7 @@ class WeatherStationManager:
             return self._last_data
 
         # Calculate time window
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         window_start = now - timedelta(seconds=beacon_interval_seconds)
 
         # Collect readings within beacon interval

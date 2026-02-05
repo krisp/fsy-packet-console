@@ -37,12 +37,13 @@ Whether you're monitoring APRS traffic, running a digipeater, connecting to a pa
   - **Fuzzy Duplicate Detection** - Intelligent filtering of corrupted iGate packets
 
 - **Comprehensive Station Tracking**
+  - Event-sourced reception history (up to 200 receptions per station)
   - Position tracking with history (6000+ positions stored)
   - Weather station monitoring with historical charts
   - Telemetry parsing and filtering
   - Device identification (2000+ radio/software database)
   - Hop count and path analysis
-  - First/last heard timestamps
+  - First/last heard timestamps with proper timezone handling (UTC)
 
 - **Advanced Position Formats**
   - **MIC-E Decoding** - Full support for Kenwood/Yaesu compressed positions

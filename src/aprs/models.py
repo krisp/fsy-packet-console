@@ -6,6 +6,7 @@ Defines all the core data structures used throughout the APRS tracking system:
 - APRSWeather: Weather data from stations
 - APRSStatus: Status text reports
 - APRSTelemetry: Analog/digital telemetry packets
+- ReceptionEvent: Single packet reception event (ground truth for events-based architecture)
 - APRSStation: Complete station profile with history
 """
 
@@ -95,12 +96,44 @@ class APRSTelemetry:
 
 
 @dataclass
+class ReceptionEvent:
+    """Single reception of a packet (direct RF or relayed).
+
+    This is the ground truth for packet receptions. Instead of maintaining
+    fragile aggregate fields (hop_count, heard_direct, relay_paths, etc.),
+    we record each reception as an event and compute aggregates from the
+    complete history.
+
+    Attributes:
+        timestamp: When the packet was received
+        hop_count: 0=direct RF, 1+=digipeated, 999=unknown/igated
+        direct_rf: True if heard on RF, False if via iGate third-party
+        relay_call: iGate callsign that relayed (None if direct)
+        digipeater_path: RF path taken (empty if direct RF)
+        packet_type: Type of packet ('position', 'weather', 'message', 'status', 'telemetry')
+        frame_number: Optional reference back to frame buffer for audit trail
+    """
+    timestamp: datetime
+    hop_count: int  # 0=direct, 1+=relayed, 999=unknown/igated
+    direct_rf: bool  # True if heard on RF, False if third-party/iGate
+    relay_call: Optional[str] = None  # iGate that relayed (None if direct)
+    digipeater_path: List[str] = field(default_factory=list)  # RF path taken
+    packet_type: str = "unknown"  # Position, weather, message, status, telemetry
+    frame_number: Optional[int] = None  # Reference to frame buffer
+
+
+@dataclass
 class APRSStation:
     """Represents an APRS station with all known information."""
 
     callsign: str
     first_heard: datetime
     last_heard: datetime
+
+    # Reception history - single source of truth
+    receptions: List[ReceptionEvent] = field(
+        default_factory=list
+    )  # Complete packet reception history (keep last 200)
 
     # Position data
     last_position: Optional[APRSPosition] = None
@@ -130,38 +163,116 @@ class APRSStation:
     # Packet statistics
     packets_heard: int = 0  # Total packets from this station
 
-    # Third-party tracking
-    relay_paths: List[str] = field(
-        default_factory=list
-    )  # Relay stations (iGates) that forwarded packets
-    heard_direct: bool = (
-        False  # True if heard directly on RF (not via third-party)
-    )
-    hop_count: int = (
-        999  # Minimum hop count observed (0 = direct RF, 999 = unknown)
-    )
-    heard_zero_hop: bool = (
-        False  # True if we've EVER heard this station with 0 hops (direct, no digipeaters)
-    )
-    last_heard_zero_hop: Optional[datetime] = (
-        None  # Timestamp of last zero-hop packet (direct RF only, no digipeaters)
-    )
-    zero_hop_packet_count: int = 0  # Count of packets heard with 0 hops (direct RF only)
-
     # Device identification
     device: Optional[str] = None  # Device/radio type (e.g., "Yaesu FTM-400DR")
 
-    # Digipeater tracking (for coverage mapping and routing)
-    digipeater_path: List[str] = field(
-        default_factory=list
-    )  # Complete digipeater path from last packet (all hops) - DEPRECATED, use digipeater_paths
-
-    digipeater_paths: List[List[str]] = field(
-        default_factory=list
-    )  # All unique digipeater paths observed (including "DIRECT" for 0-hop)
-
+    # Digipeater participation tracking
+    is_digipeater: bool = False  # True if this station has acted as a digipeater
     digipeaters_heard_by: List[str] = field(
         default_factory=list
     )  # First-hop digipeaters only (for coverage circles)
 
-    is_digipeater: bool = False  # True if this station has acted as a digipeater
+    # DEPRECATED AGGREGATE FIELDS (replaced by computed properties from receptions)
+    # These fields are maintained for backward compatibility during transition.
+    # New code should use the @property methods below, which compute values from receptions.
+    #
+    # Fields being replaced:
+    # - relay_paths → @property (computed from receptions)
+    # - heard_direct → @property (computed from receptions)
+    # - hop_count → @property (computed from receptions)
+    # - heard_zero_hop → @property (computed from receptions)
+    # - last_heard_zero_hop → @property (computed from receptions)
+    # - zero_hop_packet_count → @property (computed from receptions)
+    # - digipeater_path → @property (computed from receptions)
+    # - digipeater_paths → @property (computed from receptions)
+    # - digipeaters_heard_by (currently not converted to property - still computed separately)
+
+    # Computed Properties (Single Source of Truth: receptions)
+
+    @property
+    def hop_count(self) -> int:
+        """Minimum hop count from direct RF receptions (exclude iGate).
+
+        Returns:
+            Minimum hop count (0=direct RF, 1+=digipeated, 999=unknown/no receptions)
+        """
+        direct = [r.hop_count for r in self.receptions
+                  if r.direct_rf and r.hop_count < 999]
+        return min(direct) if direct else 999
+
+    @property
+    def heard_direct(self) -> bool:
+        """True if we've ever heard this station directly on RF.
+
+        Returns:
+            True if any reception was direct RF, False otherwise
+        """
+        return any(r.direct_rf for r in self.receptions)
+
+    @property
+    def heard_zero_hop(self) -> bool:
+        """True if we've ever heard zero-hop (direct RF, no digipeaters).
+
+        Returns:
+            True if any direct RF reception had zero hops, False otherwise
+        """
+        return any(r.hop_count == 0 and r.direct_rf for r in self.receptions)
+
+    @property
+    def zero_hop_packet_count(self) -> int:
+        """Count of zero-hop receptions (direct RF, no digipeaters).
+
+        Returns:
+            Number of receptions with hop_count=0 and direct_rf=True
+        """
+        return sum(1 for r in self.receptions
+                   if r.hop_count == 0 and r.direct_rf)
+
+    @property
+    def relay_paths(self) -> List[str]:
+        """Unique iGates that relayed this station.
+
+        Returns:
+            Sorted list of unique relay callsigns (empty if only direct RF)
+        """
+        relays = {r.relay_call for r in self.receptions if r.relay_call}
+        return sorted(relays)
+
+    @property
+    def last_heard_zero_hop(self) -> Optional[datetime]:
+        """Timestamp of last zero-hop reception (direct RF, no digipeaters).
+
+        Returns:
+            Timestamp of most recent zero-hop reception, or None if never heard zero-hop
+        """
+        zero_hops = [r.timestamp for r in self.receptions
+                     if r.hop_count == 0 and r.direct_rf]
+        return max(zero_hops) if zero_hops else None
+
+    @property
+    def digipeater_path(self) -> List[str]:
+        """Complete digipeater path from last direct RF packet.
+
+        Returns:
+            Digipeater path from most recent direct RF reception, empty list if none
+        """
+        direct_rf_receptions = [r for r in self.receptions if r.direct_rf]
+        return direct_rf_receptions[-1].digipeater_path if direct_rf_receptions else []
+
+    @property
+    def digipeater_paths(self) -> List[List[str]]:
+        """All unique digipeater paths observed.
+
+        Returns:
+            List of all unique paths, sorted. Includes empty list for direct RF packets.
+        """
+        paths = set()
+        for r in self.receptions:
+            if r.digipeater_path:
+                paths.add(tuple(r.digipeater_path))
+            else:
+                # Mark direct RF packets with empty tuple
+                paths.add(())
+        # Convert back to lists and filter out empty lists unless it was explicit
+        result = [list(p) for p in sorted(paths)]
+        return result

@@ -5,7 +5,7 @@ Uses the undocumented /get_livedata_info endpoint for real-time sensor data.
 """
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 import aiohttp
@@ -103,7 +103,7 @@ class EcowittWeatherStation(WeatherStation):
             weather = self._parse_response(data)
 
             # Cache the result
-            self._last_fetch = datetime.now()
+            self._last_fetch = datetime.now(timezone.utc)
             self._last_data = weather
 
             return weather
@@ -153,7 +153,7 @@ class EcowittWeatherStation(WeatherStation):
         Returns:
             WeatherData object with parsed sensor values
         """
-        weather = WeatherData(timestamp=datetime.now())
+        weather = WeatherData(timestamp=datetime.now(timezone.utc))
 
         # Parse common_list (main sensors)
         for item in data.get('common_list', []):

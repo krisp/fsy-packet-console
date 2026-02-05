@@ -2,7 +2,7 @@
 
 import hashlib
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Set
 
 from .models import APRSStation
@@ -29,6 +29,7 @@ class DuplicateDetector:
         self.window_seconds = window_seconds
         self._duplicate_cache: Dict[str, float] = {}  # hash -> timestamp
         self._stations_dict = None  # Will be set by APRSManager
+        self._manager = None  # Will be set by APRSManager
 
     def set_stations_reference(self, stations_dict):
         """Set reference to APRSManager's stations dictionary.
@@ -38,7 +39,15 @@ class DuplicateDetector:
         """
         self._stations_dict = stations_dict
 
-    def is_duplicate(self, callsign: str, info: str) -> bool:
+    def set_manager_reference(self, manager):
+        """Set reference to the APRSManager instance.
+
+        Args:
+            manager: APRSManager instance
+        """
+        self._manager = manager
+
+    def is_duplicate(self, callsign: str, info: str, timestamp: float = None) -> bool:
         """Check if packet is a duplicate based on source and content.
 
         Packets from the same source with identical content within the
@@ -47,6 +56,7 @@ class DuplicateDetector:
         Args:
             callsign: Source callsign
             info: Packet information field content
+            timestamp: Optional timestamp for the packet (defaults to now, used by migrations)
 
         Returns:
             True if packet is a duplicate, False otherwise
@@ -55,7 +65,8 @@ class DuplicateDetector:
         packet_key = f"{callsign.upper()}:{info}"
         packet_hash = hashlib.md5(packet_key.encode()).hexdigest()
 
-        current_time = time.time()
+        # Use provided timestamp or current time
+        current_time = timestamp if timestamp is not None else time.time()
 
         # Clean old entries from cache (older than duplicate window)
         expired = [
@@ -80,7 +91,7 @@ class DuplicateDetector:
         return False
 
     def record_path(self, callsign: str, digipeater_path: List[str],
-                   stations_dict: Dict = None):
+                   stations_dict: Dict = None, timestamp: float = None):
         """Record digipeater paths for a station (used even for duplicate packets).
 
         This lightweight method ONLY updates digipeater tracking without full packet
@@ -97,6 +108,9 @@ class DuplicateDetector:
             stations_dict: Optional reference to stations dictionary for legacy support
         """
         # Use provided dict or stored reference
+        # NOTE: For duplicates, we still want to track digipeater paths for coverage analysis.
+        # Create a ReceptionEvent via _get_or_create_station to record the path.
+
         if stations_dict is None:
             stations_dict = self._stations_dict
 
@@ -106,46 +120,26 @@ class DuplicateDetector:
         if not digipeater_path:
             return  # No digipeaters to record
 
-        # Strip asterisk from callsign (APRS path marker, not part of callsign)
-        callsign_upper = callsign.upper().rstrip('*')
-        now = datetime.now()
+        # Import APRSManager to access _get_or_create_station
+        # (We can't directly import at module level due to circular dependency)
+        from src.aprs.manager import APRSManager
 
-        # Create station if it doesn't exist
-        if callsign_upper not in stations_dict:
-            stations_dict[callsign_upper] = APRSStation(
-                callsign=callsign_upper,
-                first_heard=now,
-                last_heard=now,
-                packets_heard=0,
+        # Find the APRSManager instance that owns this stations_dict
+        # This is a bit hacky, but necessary for the architecture
+        manager = getattr(self, '_manager', None)
+        if manager and hasattr(manager, '_get_or_create_station'):
+            # Convert timestamp float to datetime if provided (timezone-aware UTC)
+            timestamp_dt = datetime.fromtimestamp(timestamp, tz=timezone.utc) if timestamp else None
+
+            # Use _get_or_create_station to track the path via ReceptionEvent
+            # Mark as duplicate so packets_heard doesn't increment
+            manager._get_or_create_station(
+                callsign=callsign,
+                relay_call=None,  # Duplicates are RF paths, not third-party
+                hop_count=len(digipeater_path),  # Estimate based on path length
+                is_duplicate=True,  # Don't increment packet count
+                digipeater_path=digipeater_path,
+                packet_type="unknown",  # We don't know the type for duplicates
+                frame_number=None,
+                timestamp=timestamp_dt,  # Pass historical timestamp
             )
-
-        # Update last_heard timestamp (don't increment packet count for duplicates)
-        stations_dict[callsign_upper].last_heard = now
-
-        # Store complete digipeater path (legacy single path field)
-        stations_dict[callsign_upper].digipeater_path = [d.upper() for d in digipeater_path]
-
-        # Store in all-paths list (new)
-        if digipeater_path:
-            normalized_path = [d.upper() for d in digipeater_path]
-            if normalized_path not in stations_dict[callsign_upper].digipeater_paths:
-                stations_dict[callsign_upper].digipeater_paths.append(normalized_path)
-        else:
-            # Heard direct (no digipeaters) - add "DIRECT" to paths
-            stations_dict[callsign_upper].heard_zero_hop = True
-            if ["DIRECT"] not in stations_dict[callsign_upper].digipeater_paths:
-                stations_dict[callsign_upper].digipeater_paths.append(["DIRECT"])
-
-        # Mark all stations in the digipeater path as digipeaters
-        # Only mark stations we've actually heard (don't create phantom entries)
-        for digi_call in digipeater_path:
-            digi_upper = digi_call.upper().rstrip('*')
-            if digi_upper and digi_upper in stations_dict:
-                if not stations_dict[digi_upper].is_digipeater:
-                    stations_dict[digi_upper].is_digipeater = True
-
-        # Track only FIRST digipeater for coverage mapping
-        # (the one that heard the station directly over RF)
-        first_digi = digipeater_path[0].upper().rstrip('*')
-        if first_digi and first_digi not in stations_dict[callsign_upper].digipeaters_heard_by:
-            stations_dict[callsign_upper].digipeaters_heard_by.append(first_digi)

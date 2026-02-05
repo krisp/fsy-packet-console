@@ -272,7 +272,7 @@ function getSortValue(station, column) {
         case 'packets':
             return station.packets_heard || 0;
         case 'hops':
-            return station.hop_count || 999;
+            return station.hop_count !== undefined ? station.hop_count : 999;
         case 'direct':
             return station.heard_direct ? 0 : 1; // Direct first
         case 'messages':

@@ -43,6 +43,28 @@ MESSAGE_MAX_RETRIES = (
 # Duplicate packet suppression configuration
 DUPLICATE_WINDOW = 30  # seconds to track packet duplicates
 
+def ensure_utc_aware(dt: Optional[datetime]) -> Optional[datetime]:
+    """Convert naive datetime to UTC-aware datetime.
+
+    Args:
+        dt: Datetime object (may be naive or timezone-aware)
+
+    Returns:
+        UTC-aware datetime, or None if input is None
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        # Naive datetime - assume UTC
+        return dt.replace(tzinfo=timezone.utc)
+    elif dt.tzinfo != timezone.utc:
+        # Different timezone - convert to UTC
+        return dt.astimezone(timezone.utc)
+    else:
+        # Already UTC-aware
+        return dt
+
+
 
 class APRSManager:
     """Manages APRS messages and weather tracking."""
@@ -66,6 +88,9 @@ class APRSManager:
         self.retry_fast = retry_fast  # Timeout for messages not yet digipeated
         self.retry_slow = retry_slow  # Timeout for messages digipeated but not ACKed
 
+        # Migration mode flag (disables expensive operations during bulk replay)
+        self._migration_mode = False
+
         # Storage
         self.messages: List[APRSMessage] = []  # Messages addressed to us
         self.monitored_messages: List[APRSMessage] = (
@@ -84,6 +109,7 @@ class APRSManager:
         # Duplicate packet detection
         self.duplicate_detector = DuplicateDetector()
         self.duplicate_detector.set_stations_reference(self.stations)
+        self.duplicate_detector.set_manager_reference(self)
 
         # Legacy: Keep _duplicate_cache for backwards compatibility with is_duplicate_packet()
         self._duplicate_cache: Dict[str, float] = {}
@@ -171,7 +197,7 @@ class APRSManager:
                 "stations": {},
                 "messages": [],
                 "migrations": getattr(self, 'migrations', {}),  # Migration state
-                "saved_at": datetime.now().isoformat(),
+                "saved_at": datetime.now(timezone.utc).isoformat(),
             }
 
             # Convert stations to JSON-serializable format
@@ -183,17 +209,13 @@ class APRSManager:
                     "messages_received": station.messages_received,
                     "messages_sent": station.messages_sent,
                     "packets_heard": station.packets_heard,
-                    "zero_hop_packet_count": station.zero_hop_packet_count,
-                    "relay_paths": station.relay_paths,
-                    "heard_direct": station.heard_direct,
-                    "hop_count": station.hop_count,
-                    "heard_zero_hop": station.heard_zero_hop,
-                    "last_heard_zero_hop": station.last_heard_zero_hop.isoformat() if station.last_heard_zero_hop else None,
                     "device": station.device,
-                    "digipeater_path": station.digipeater_path,
-                    "digipeater_paths": station.digipeater_paths,
                     "digipeaters_heard_by": station.digipeaters_heard_by,
                     "is_digipeater": station.is_digipeater,
+                    # NOTE: The following are @property fields computed from receptions:
+                    # - zero_hop_packet_count, relay_paths, heard_direct, hop_count
+                    # - heard_zero_hop, last_heard_zero_hop, digipeater_path, digipeater_paths
+                    # They are NOT saved to reduce database size and prevent inconsistencies
                 }
 
                 # Add position data if present
@@ -304,6 +326,20 @@ class APRSManager:
                             }
                         )
 
+                # Add reception events (NEW: single source of truth)
+                if station.receptions:
+                    station_data["receptions"] = []
+                    for reception in station.receptions:
+                        station_data["receptions"].append({
+                            "timestamp": reception.timestamp.isoformat(),
+                            "hop_count": reception.hop_count,
+                            "direct_rf": reception.direct_rf,
+                            "relay_call": reception.relay_call,
+                            "digipeater_path": reception.digipeater_path,
+                            "packet_type": reception.packet_type,
+                            "frame_number": reception.frame_number,
+                        })
+
                 data["stations"][callsign] = station_data
 
             # Save monitored messages
@@ -398,6 +434,11 @@ class APRSManager:
         else:
             return  # No saved database, start fresh
 
+        # Initialize migration state from database
+        self.migrations = data.get('migrations', {})
+        if 'migrations_applied' not in self.migrations:
+            self.migrations['migrations_applied'] = {}
+
         try:
             parse_start = time.time()
 
@@ -408,47 +449,29 @@ class APRSManager:
 
             # Restore stations
             for callsign, station_data in data.get("stations", {}).items():
-                # Create station object
-                # Parse last_heard_zero_hop if present
-                last_heard_zero_hop = None
-                if station_data.get("last_heard_zero_hop"):
-                    try:
-                        last_heard_zero_hop = datetime.fromisoformat(
-                            station_data["last_heard_zero_hop"]
-                        )
-                    except (ValueError, TypeError):
-                        last_heard_zero_hop = None
-
+                # Create station object with only the new fields
                 station = APRSStation(
                     callsign=station_data["callsign"],
-                    first_heard=datetime.fromisoformat(
-                        station_data["first_heard"]
+                    first_heard=ensure_utc_aware(
+                        datetime.fromisoformat(station_data["first_heard"])
                     ),
-                    last_heard=datetime.fromisoformat(
-                        station_data["last_heard"]
+                    last_heard=ensure_utc_aware(
+                        datetime.fromisoformat(station_data["last_heard"])
                     ),
                     messages_received=station_data.get("messages_received", 0),
                     messages_sent=station_data.get("messages_sent", 0),
                     packets_heard=station_data.get("packets_heard", 0),
-                    zero_hop_packet_count=station_data.get("zero_hop_packet_count", 0),
-                    relay_paths=station_data.get("relay_paths", []),
-                    heard_direct=station_data.get("heard_direct", False),
-                    hop_count=station_data.get("hop_count", 999),
-                    heard_zero_hop=station_data.get("heard_zero_hop", False),
-                    last_heard_zero_hop=last_heard_zero_hop,
                     device=station_data.get("device"),
-                    digipeater_path=station_data.get("digipeater_path", []),
-                    digipeater_paths=station_data.get("digipeater_paths", []),
-                    digipeaters_heard_by=station_data.get("digipeaters_heard_by", []),
                     is_digipeater=station_data.get("is_digipeater", False),
+                    digipeaters_heard_by=station_data.get("digipeaters_heard_by", []),
                 )
 
                 # Restore position if present
                 if "last_position" in station_data:
                     pos_data = station_data["last_position"]
                     station.last_position = APRSPosition(
-                        timestamp=datetime.fromisoformat(
-                            pos_data["timestamp"]
+                        timestamp=ensure_utc_aware(
+                            datetime.fromisoformat(pos_data["timestamp"])
                         ),
                         station=pos_data["station"],
                         latitude=pos_data["latitude"],
@@ -467,7 +490,7 @@ class APRSManager:
                 if "last_weather" in station_data:
                     wx_data = station_data["last_weather"]
                     station.last_weather = APRSWeather(
-                        timestamp=datetime.fromisoformat(wx_data["timestamp"]),
+                        timestamp=ensure_utc_aware(datetime.fromisoformat(wx_data["timestamp"])),
                         station=wx_data["station"],
                         latitude=wx_data.get("latitude"),
                         longitude=wx_data.get("longitude"),
@@ -500,7 +523,7 @@ class APRSManager:
                     station.weather_history = []
                     for wx_data in station_data["weather_history"]:
                         wx = APRSWeather(
-                            timestamp=datetime.fromisoformat(wx_data["timestamp"]),
+                            timestamp=ensure_utc_aware(datetime.fromisoformat(wx_data["timestamp"])),
                             station=wx_data["station"],
                             latitude=wx_data.get("latitude"),
                             longitude=wx_data.get("longitude"),
@@ -531,7 +554,7 @@ class APRSManager:
                     station.position_history = []
                     for pos_data in station_data["position_history"]:
                         pos = APRSPosition(
-                            timestamp=datetime.fromisoformat(pos_data["timestamp"]),
+                            timestamp=ensure_utc_aware(datetime.fromisoformat(pos_data["timestamp"])),
                             station=pos_data["station"],
                             latitude=pos_data["latitude"],
                             longitude=pos_data["longitude"],
@@ -549,8 +572,8 @@ class APRSManager:
                 if "last_status" in station_data:
                     status_data = station_data["last_status"]
                     station.last_status = APRSStatus(
-                        timestamp=datetime.fromisoformat(
-                            status_data["timestamp"]
+                        timestamp=ensure_utc_aware(
+                            datetime.fromisoformat(status_data["timestamp"])
                         ),
                         station=status_data["station"],
                         status_text=status_data["status_text"],
@@ -560,8 +583,8 @@ class APRSManager:
                 if "last_telemetry" in station_data:
                     telem_data = station_data["last_telemetry"]
                     station.last_telemetry = APRSTelemetry(
-                        timestamp=datetime.fromisoformat(
-                            telem_data["timestamp"]
+                        timestamp=ensure_utc_aware(
+                            datetime.fromisoformat(telem_data["timestamp"])
                         ),
                         station=telem_data["station"],
                         sequence=telem_data["sequence"],
@@ -574,8 +597,8 @@ class APRSManager:
                     station.telemetry_sequence = []
                     for telem_data in station_data["telemetry_sequence"]:
                         telem = APRSTelemetry(
-                            timestamp=datetime.fromisoformat(
-                                telem_data["timestamp"]
+                            timestamp=ensure_utc_aware(
+                                datetime.fromisoformat(telem_data["timestamp"])
                             ),
                             station=telem_data["station"],
                             sequence=telem_data["sequence"],
@@ -584,6 +607,23 @@ class APRSManager:
                         )
                         station.telemetry_sequence.append(telem)
                         total_telemetry += 1
+
+                # Restore reception events (NEW: single source of truth)
+                if "receptions" in station_data:
+                    from src.aprs.models import ReceptionEvent
+                    for rx_data in station_data["receptions"]:
+                        reception = ReceptionEvent(
+                            timestamp=ensure_utc_aware(
+                                datetime.fromisoformat(rx_data["timestamp"])
+                            ),
+                            hop_count=rx_data["hop_count"],
+                            direct_rf=rx_data["direct_rf"],
+                            relay_call=rx_data.get("relay_call"),
+                            digipeater_path=rx_data.get("digipeater_path", []),
+                            packet_type=rx_data.get("packet_type", "unknown"),
+                            frame_number=rx_data.get("frame_number"),
+                        )
+                        station.receptions.append(reception)
 
                 # Add station to dictionary
                 self.stations[callsign] = station
@@ -594,14 +634,16 @@ class APRSManager:
                 last_sent = None
                 if msg_data.get("last_sent"):
                     try:
-                        last_sent = datetime.fromisoformat(
-                            msg_data["last_sent"]
+                        last_sent = ensure_utc_aware(
+                            datetime.fromisoformat(msg_data["last_sent"])
                         )
                     except Exception:
                         pass
 
                 msg = APRSMessage(
-                    timestamp=datetime.fromisoformat(msg_data["timestamp"]),
+                    timestamp=ensure_utc_aware(
+                        datetime.fromisoformat(msg_data["timestamp"])
+                    ),
                     from_call=msg_data["from_call"],
                     to_call=msg_data["to_call"],
                     message=msg_data["message"],
@@ -738,7 +780,7 @@ class APRSManager:
 
         # Strip asterisk from callsign (APRS path marker, not part of callsign)
         callsign_upper = callsign.upper().rstrip('*')
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
 
         # Create station if it doesn't exist
         if callsign_upper not in self.stations:
@@ -752,20 +794,11 @@ class APRSManager:
         # Update last_heard timestamp (don't increment packet count for duplicates)
         self.stations[callsign_upper].last_heard = now
 
-        # Store complete digipeater path (legacy single path field)
-        self.stations[callsign_upper].digipeater_path = [d.upper() for d in digipeater_path]
-
-        # Store in all-paths list (new)
-        if digipeater_path:
-            normalized_path = [d.upper() for d in digipeater_path]
-            if normalized_path not in self.stations[callsign_upper].digipeater_paths:
-                self.stations[callsign_upper].digipeater_paths.append(normalized_path)
-        else:
-            # Heard direct (no digipeaters) - add "DIRECT" to paths
-            self.stations[callsign_upper].heard_zero_hop = True
-            self.stations[callsign_upper].last_heard_zero_hop = datetime.now(timezone.utc)
-            if ["DIRECT"] not in self.stations[callsign_upper].digipeater_paths:
-                self.stations[callsign_upper].digipeater_paths.append(["DIRECT"])
+        # NOTE: The following fields are now @property methods computed from receptions:
+        # - digipeater_path, digipeater_paths, heard_zero_hop, last_heard_zero_hop
+        # This function is obsolete and only used by legacy tests.
+        # The duplicate_detector.record_path() method should be used instead,
+        # which creates proper ReceptionEvents.
 
         # Mark all stations in the digipeater path as digipeaters
         # Only mark stations we've actually heard (don't create phantom entries)
@@ -788,8 +821,11 @@ class APRSManager:
         hop_count: int = 999,
         is_duplicate: bool = False,
         digipeater_path: List[str] = None,
+        packet_type: str = "unknown",
+        frame_number: int = None,
+        timestamp: datetime = None,
     ) -> APRSStation:
-        """Get or create a station entry.
+        """Get or create a station entry and record reception event.
 
         Args:
             callsign: Station callsign
@@ -797,77 +833,80 @@ class APRSManager:
             hop_count: Number of digipeater hops (0 = direct RF, 999 = unknown)
             is_duplicate: If True, don't increment packet count (duplicate suppression)
             digipeater_path: List of digipeater callsigns from AX.25 path
+            packet_type: Type of APRS packet (position, weather, message, etc.)
+            frame_number: Optional frame buffer reference number
+            timestamp: Optional timestamp for reception (defaults to now, used by migrations)
 
         Returns:
             APRSStation object
         """
         # Strip asterisk from callsign (APRS path marker, not part of callsign)
         callsign_upper = callsign.upper().rstrip('*')
-        now = datetime.now()
+
+        # Use provided timestamp or current time
+        # Convert to UTC for consistent storage
+        if timestamp:
+            if timestamp.tzinfo:
+                # Already timezone-aware, convert to UTC
+                reception_time = timestamp.astimezone(timezone.utc)
+            else:
+                # Naive timestamp - assume local time, make aware and convert to UTC
+                local_tz = datetime.now(timezone.utc).astimezone().tzinfo
+                reception_time = timestamp.replace(tzinfo=local_tz).astimezone(timezone.utc)
+        else:
+            reception_time = datetime.now(timezone.utc)
 
         if callsign_upper not in self.stations:
             self.stations[callsign_upper] = APRSStation(
                 callsign=callsign_upper,
-                first_heard=now,
-                last_heard=now,
+                first_heard=reception_time,
+                last_heard=reception_time,
                 packets_heard=0,
             )
 
-        # Update last heard
-        self.stations[callsign_upper].last_heard = now
+        # Update last heard (and potentially first heard)
+        if reception_time < self.stations[callsign_upper].first_heard:
+            self.stations[callsign_upper].first_heard = reception_time
+        if reception_time > self.stations[callsign_upper].last_heard:
+            self.stations[callsign_upper].last_heard = reception_time
 
-        # Only increment packet count if not a duplicate
+        # Increment packet count only for non-duplicates
         if not is_duplicate:
             self.stations[callsign_upper].packets_heard += 1
-            # Track zero-hop packets separately
-            # NOTE: Third-party packets (igated from APRS-IS) should NEVER count as zero-hop
-            # even if the RF path from iGate to us was direct (hop_count=0)
-            if hop_count == 0 and not relay_call:
-                self.stations[callsign_upper].zero_hop_packet_count += 1
 
-        # Update hop count to minimum observed
-        if hop_count < self.stations[callsign_upper].hop_count:
-            self.stations[callsign_upper].hop_count = hop_count
+        # Create ReceptionEvent to record this packet reception
+        # (even for duplicates, to track digipeater paths for coverage analysis)
+        from src.aprs.models import ReceptionEvent
 
-        # Track if we've EVER heard with zero hops (direct, no digipeaters)
-        # NOTE: Third-party packets (igated from APRS-IS) should NEVER count as zero-hop
-        # even if the RF path from iGate to us was direct (hop_count=0)
-        if hop_count == 0 and not relay_call:
-            self.stations[callsign_upper].heard_zero_hop = True
-            self.stations[callsign_upper].last_heard_zero_hop = datetime.now(timezone.utc)
+        # Normalize digipeater path
+        norm_path = [d.upper() for d in digipeater_path] if digipeater_path else []
 
-        # Track relay path if third-party
-        if relay_call:
-            relay_upper = relay_call.upper()
-            if relay_upper not in self.stations[callsign_upper].relay_paths:
-                self.stations[callsign_upper].relay_paths.append(relay_upper)
-        else:
-            # Heard directly on RF
-            self.stations[callsign_upper].heard_direct = True
+        event = ReceptionEvent(
+            timestamp=reception_time,
+            hop_count=hop_count,
+            direct_rf=(relay_call is None),
+            relay_call=relay_call.upper() if relay_call else None,
+            digipeater_path=norm_path,
+            packet_type=packet_type,
+            frame_number=frame_number,
+        )
 
-        # Track digipeater paths for analysis
-        # - Complete path: all hops (for routing analysis, first/last hop determination)
-        # - First hop only: for digipeater coverage circles
+        self.stations[callsign_upper].receptions.append(event)
+
+        # Prune to last 200 receptions (keep memory bounded)
+        if len(self.stations[callsign_upper].receptions) > 200:
+            self.stations[callsign_upper].receptions = (
+                self.stations[callsign_upper].receptions[-200:]
+            )
+
+        # Mark digipeater stations (for coverage mapping)
+        # This happens even for duplicates to improve digipeater detection
         if digipeater_path:
-            # Store complete path (legacy single path field)
-            self.stations[callsign_upper].digipeater_path = [d.upper() for d in digipeater_path]
-
-            # Store in all-paths list (new)
-            normalized_path = [d.upper() for d in digipeater_path]
-            if normalized_path not in self.stations[callsign_upper].digipeater_paths:
-                self.stations[callsign_upper].digipeater_paths.append(normalized_path)
-
-            # Mark all stations in the digipeater path as digipeaters
-            # Only mark stations we've actually heard (don't create phantom entries)
             for digi_call in digipeater_path:
                 digi_upper = digi_call.upper().rstrip('*')
                 if digi_upper and digi_upper != callsign_upper and digi_upper in self.stations:
                     if not self.stations[digi_upper].is_digipeater:
                         self.stations[digi_upper].is_digipeater = True
-        elif hop_count == 0:
-            # Heard direct (no digipeaters) - add "DIRECT" to paths
-            if ["DIRECT"] not in self.stations[callsign_upper].digipeater_paths:
-                self.stations[callsign_upper].digipeater_paths.append(["DIRECT"])
 
         return self.stations[callsign_upper]
 
@@ -926,6 +965,8 @@ class APRSManager:
         relay_call: str = None,
         hop_count: int = 999,
         digipeater_path: List[str] = None,
+        timestamp: datetime = None,
+        frame_number: int = None,
     ) -> Optional[APRSPosition]:
         """Parse MIC-E format APRS position.
 
@@ -1148,7 +1189,7 @@ class APRSManager:
 
             # Create position object
             pos = APRSPosition(
-                timestamp=datetime.now(),
+                timestamp=ensure_utc_aware(timestamp) if timestamp else datetime.now(timezone.utc),
                 station=station.upper(),
                 latitude=latitude,
                 longitude=longitude,
@@ -1163,7 +1204,7 @@ class APRSManager:
             self.position_reports[station.upper()] = pos
 
             # Track station
-            sta = self._get_or_create_station(station, relay_call, hop_count, digipeater_path=digipeater_path)
+            sta = self._get_or_create_station(station, relay_call, hop_count, digipeater_path=digipeater_path, packet_type="mic_e", timestamp=timestamp, frame_number=frame_number)
             sta.last_position = pos
             if device_str:
                 sta.device = device_str
@@ -1193,6 +1234,8 @@ class APRSManager:
         relay_call: str = None,
         hop_count: int = 999,
         digipeater_path: List[str] = None,
+        timestamp: datetime = None,
+        frame_number: int = None
     ) -> Optional[APRSMessage]:
         """Parse APRS message format.
 
@@ -1256,11 +1299,9 @@ class APRSManager:
             if message_text.startswith(("PARM.", "UNIT.", "EQNS.", "BITS.")):
                 # Track station activity but don't treat as a message
                 sender_station = self._get_or_create_station(
-                    from_call, relay_call, hop_count, digipeater_path=digipeater_path
+                    from_call, relay_call, hop_count, digipeater_path=digipeater_path, packet_type="telemetry_config", timestamp=timestamp, frame_number=frame_number
                 )
-                sender_station.packets_heard += (
-                    1  # Count as packet, not message
-                )
+                # Note: packets_heard incremented by _get_or_create_station
                 print_debug(
                     f"parse_aprs_message: filtered out telemetry config message",
                     level=5,
@@ -1272,9 +1313,9 @@ class APRSManager:
             if message_text.lower().startswith(("ack", "rej")):
                 # Track station activity
                 sender_station = self._get_or_create_station(
-                    from_call, relay_call, hop_count, digipeater_path=digipeater_path
+                    from_call, relay_call, hop_count, digipeater_path=digipeater_path, packet_type="message_ack", timestamp=timestamp, frame_number=frame_number
                 )
-                sender_station.packets_heard += 1  # Count as packet activity
+                # Note: packets_heard incremented by _get_or_create_station
 
                 # Check if this ACK is for one of our sent messages
                 if message_text.lower().startswith("ack"):
@@ -1399,7 +1440,7 @@ class APRSManager:
 
             # Create message object
             msg = APRSMessage(
-                timestamp=datetime.now(),
+                timestamp=ensure_utc_aware(timestamp) if timestamp else datetime.now(timezone.utc),
                 from_call=from_call.upper(),
                 to_call=to_call.upper(),
                 message=message_text,
@@ -1409,7 +1450,7 @@ class APRSManager:
 
             # Track station activity
             sender_station = self._get_or_create_station(
-                from_call, relay_call, hop_count, digipeater_path=digipeater_path
+                from_call, relay_call, hop_count, digipeater_path=digipeater_path, packet_type="message", timestamp=timestamp, frame_number=frame_number
             )
             sender_station.messages_sent += 1
 
@@ -1512,6 +1553,8 @@ class APRSManager:
         relay_call: str = None,
         hop_count: int = 999,
         digipeater_path: List[str] = None,
+        timestamp: datetime = None,
+        frame_number: int = None
     ) -> Optional[APRSWeather]:
         """Parse APRS weather data.
 
@@ -1536,7 +1579,7 @@ class APRSManager:
 
         try:
             wx = APRSWeather(
-                timestamp=datetime.now(),
+                timestamp=ensure_utc_aware(timestamp) if timestamp else datetime.now(timezone.utc),
                 station=station.upper(),
                 raw_data=info,
             )
@@ -1643,7 +1686,7 @@ class APRSManager:
             self.weather_reports[station.upper()] = wx
 
             # Track station activity
-            sta = self._get_or_create_station(station, relay_call, hop_count, digipeater_path=digipeater_path)
+            sta = self._get_or_create_station(station, relay_call, hop_count, digipeater_path=digipeater_path, packet_type="weather", timestamp=timestamp, frame_number=frame_number)
             sta.last_weather = wx
             self._add_weather_to_history(sta, wx)
 
@@ -1672,8 +1715,23 @@ class APRSManager:
         now = weather.timestamp
         history = station.weather_history
 
+        # Always append first
+        history.append(weather)
+
+        # Skip expensive operations during migration
+        if self._migration_mode:
+            return
+
+        # Sort
+        history.sort(key=lambda w: w.timestamp, reverse=True)
+
+        # Only run retention policy when history exceeds threshold
+        # This avoids O(n²) during migration
+        if len(history) <= 250:
+            return  # No pruning needed yet
+
         # Calculate pressure tendency (3-hour change)
-        if weather.pressure is not None and history:
+        if weather.pressure is not None:
             # Find weather report from ~3 hours ago
             three_hours_ago = now - timedelta(hours=3)
             tolerance = timedelta(minutes=30)  # ±30 min tolerance
@@ -1691,12 +1749,6 @@ class APRSManager:
                     else:
                         weather.pressure_tendency = 'steady'
                     break
-
-        # Always add the new report
-        history.append(weather)
-
-        # Sort by timestamp (newest first)
-        history.sort(key=lambda w: w.timestamp, reverse=True)
 
         # Build retention list with three-tier policy
         retained = []
@@ -1760,11 +1812,20 @@ class APRSManager:
         now = position.timestamp
         history = station.position_history
 
-        # Always add the new position
+        # Always append (O(1) - fast)
         history.append(position)
 
-        # Sort by timestamp (newest first)
+        # Skip expensive operations during migration
+        if self._migration_mode:
+            return
+
+        # Sort before retention policy (Python's Timsort is O(n) for nearly-sorted lists)
         history.sort(key=lambda p: p.timestamp, reverse=True)
+
+        # Only run retention policy when history exceeds threshold
+        # This avoids O(n²) during migration (running policy on every frame)
+        if len(history) <= 250:
+            return  # No pruning needed yet, skip expensive retention policy
 
         # Build retention list with movement-based policy
         retained = []
@@ -1866,7 +1927,7 @@ class APRSManager:
         Returns:
             The created message object
         """
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         msg = APRSMessage(
             timestamp=now,
             from_call=self.my_callsign,
@@ -1910,7 +1971,7 @@ class APRSManager:
         Returns:
             List of messages that should be retried
         """
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         pending = []
 
         for msg in self.messages:
@@ -1976,7 +2037,7 @@ class APRSManager:
         Returns:
             List of expired messages
         """
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         expired = []
 
         for msg in self.messages:
@@ -2005,7 +2066,7 @@ class APRSManager:
             msg: Message that was just retransmitted
         """
         msg.retry_count += 1
-        msg.last_sent = datetime.now()
+        msg.last_sent = datetime.now(timezone.utc)
 
         # Note: Do NOT mark as failed here - we need to wait for the timeout
         # period after the last transmission to see if an ACK arrives.
@@ -2123,7 +2184,7 @@ class APRSManager:
 
         if len(station.weather_history) >= 2:
             # Look for pressure readings in the last 3-6 hours
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
             recent_readings = []
 
             for wx in station.weather_history:
@@ -2165,7 +2226,7 @@ class APRSManager:
                         confidence = 'high' if time_diff_hours >= 3 else 'medium'
 
         # Get current month for seasonal adjustment
-        current_month = datetime.now().month
+        current_month = datetime.now(timezone.utc).month
 
         # Get wind direction (optional for Zambretti)
         wind_dir = weather.wind_direction
@@ -2565,7 +2626,7 @@ class APRSManager:
                     pass
 
             pos = APRSPosition(
-                timestamp=datetime.now(),
+                timestamp=ensure_utc_aware(timestamp) if timestamp else datetime.now(timezone.utc),
                 station=station.upper(),
                 latitude=latitude,
                 longitude=longitude,
@@ -2580,7 +2641,7 @@ class APRSManager:
             self.position_reports[station.upper()] = pos
 
             # Track station activity
-            sta = self._get_or_create_station(station, relay_call, hop_count, digipeater_path=digipeater_path)
+            sta = self._get_or_create_station(station, relay_call, hop_count, digipeater_path=digipeater_path, packet_type="position", timestamp=timestamp, frame_number=frame_number)
             sta.last_position = pos
             if device_str:
                 sta.device = device_str
@@ -2603,6 +2664,8 @@ class APRSManager:
         hop_count: int = 999,
         digipeater_path: List[str] = None,
         dest_addr: str = None,
+        timestamp: datetime = None,
+        frame_number: int = None
     ) -> Optional[APRSPosition]:
         """Parse APRS position report.
 
@@ -2714,7 +2777,7 @@ class APRSManager:
                     pass  # Silently ignore device ID errors
 
             pos = APRSPosition(
-                timestamp=datetime.now(),
+                timestamp=ensure_utc_aware(timestamp) if timestamp else datetime.now(timezone.utc),
                 station=station.upper(),
                 latitude=latitude,
                 longitude=longitude,
@@ -2729,7 +2792,7 @@ class APRSManager:
             self.position_reports[station.upper()] = pos
 
             # Track station activity
-            sta = self._get_or_create_station(station, relay_call, hop_count, digipeater_path=digipeater_path)
+            sta = self._get_or_create_station(station, relay_call, hop_count, digipeater_path=digipeater_path, packet_type="position", timestamp=timestamp, frame_number=frame_number)
             sta.last_position = pos
             if device_str:
                 sta.device = device_str
@@ -2750,6 +2813,8 @@ class APRSManager:
         relay_call: str = None,
         hop_count: int = 999,
         digipeater_path: List[str] = None,
+        timestamp: datetime = None,
+        frame_number: int = None
     ) -> Optional[APRSPosition]:
         """Parse APRS object report.
 
@@ -2833,7 +2898,7 @@ class APRSManager:
 
             # Create position object using the OBJECT name as the station
             pos = APRSPosition(
-                timestamp=datetime.now(),
+                timestamp=ensure_utc_aware(timestamp) if timestamp else datetime.now(timezone.utc),
                 station=object_name.upper(),  # Use object name, not sender
                 latitude=latitude,
                 longitude=longitude,
@@ -2848,7 +2913,7 @@ class APRSManager:
 
             # Track as station (objects are tracked like stations)
             sta = self._get_or_create_station(
-                object_name, relay_call, hop_count
+                object_name, relay_call, hop_count, packet_type="object", timestamp=timestamp, frame_number=frame_number
             )
             sta.last_position = pos
             self._add_position_to_history(sta, pos)
@@ -2868,6 +2933,8 @@ class APRSManager:
         relay_call: str = None,
         hop_count: int = 999,
         digipeater_path: List[str] = None,
+        timestamp: datetime = None,
+        frame_number: int = None
     ) -> Optional[APRSStatus]:
         """Parse APRS status report.
 
@@ -2893,13 +2960,13 @@ class APRSManager:
 
             # Create status object
             status = APRSStatus(
-                timestamp=datetime.now(),
+                timestamp=ensure_utc_aware(timestamp) if timestamp else datetime.now(timezone.utc),
                 station=station.upper(),
                 status_text=status_text,
             )
 
             # Track as station
-            sta = self._get_or_create_station(station, relay_call, hop_count, digipeater_path=digipeater_path)
+            sta = self._get_or_create_station(station, relay_call, hop_count, digipeater_path=digipeater_path, packet_type="status", timestamp=timestamp, frame_number=frame_number)
             sta.last_status = status
 
             return status
@@ -2914,6 +2981,8 @@ class APRSManager:
         relay_call: str = None,
         hop_count: int = 999,
         digipeater_path: List[str] = None,
+        timestamp: datetime = None,
+        frame_number: int = None
     ) -> Optional[APRSPosition]:
         """Parse APRS item report.
 
@@ -2989,7 +3058,7 @@ class APRSManager:
 
             # Create position object using the ITEM name as the station
             pos = APRSPosition(
-                timestamp=datetime.now(),
+                timestamp=ensure_utc_aware(timestamp) if timestamp else datetime.now(timezone.utc),
                 station=item_name.upper(),  # Use item name, not sender
                 latitude=latitude,
                 longitude=longitude,
@@ -3003,7 +3072,7 @@ class APRSManager:
             self.position_reports[item_name.upper()] = pos
 
             # Track as station (items are tracked like stations)
-            sta = self._get_or_create_station(item_name, relay_call, hop_count, digipeater_path=digipeater_path)
+            sta = self._get_or_create_station(item_name, relay_call, hop_count, digipeater_path=digipeater_path, packet_type="item", timestamp=timestamp, frame_number=frame_number)
             sta.last_position = pos
 
             return pos
@@ -3018,6 +3087,8 @@ class APRSManager:
         relay_call: str = None,
         hop_count: int = 999,
         digipeater_path: List[str] = None,
+        timestamp: datetime = None,
+        frame_number: int = None
     ) -> Optional[APRSTelemetry]:
         """Parse APRS telemetry packet.
 
@@ -3074,7 +3145,7 @@ class APRSManager:
 
             # Create telemetry object
             telemetry = APRSTelemetry(
-                timestamp=datetime.now(),
+                timestamp=ensure_utc_aware(timestamp) if timestamp else datetime.now(timezone.utc),
                 station=station.upper(),
                 sequence=sequence,
                 analog=analog,
@@ -3082,7 +3153,7 @@ class APRSManager:
             )
 
             # Track as station
-            sta = self._get_or_create_station(station, relay_call, hop_count, digipeater_path=digipeater_path)
+            sta = self._get_or_create_station(station, relay_call, hop_count, digipeater_path=digipeater_path, packet_type="telemetry", timestamp=timestamp, frame_number=frame_number)
             sta.last_telemetry = telemetry
 
             # Keep recent telemetry history (last 20 packets)
@@ -3804,7 +3875,7 @@ class APRSManager:
         Returns:
             Tuple of (stations_pruned, messages_pruned)
         """
-        cutoff_time = datetime.now() - timedelta(days=days)
+        cutoff_time = datetime.now(timezone.utc) - timedelta(days=days)
 
         # Prune stations
         stations_to_remove = []

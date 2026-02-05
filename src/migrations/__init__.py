@@ -138,7 +138,7 @@ class MigrationManager:
     def run_migrations(self, force: bool = False) -> Dict[str, Any]:
         """Run all pending migrations.
 
-        Automatically discovers and runs migrations in order (m001, m002, ...).
+        Automatically discovers and runs migrations in order (m001, m002, m003, ...).
 
         Args:
             force: If True, re-run all migrations (for testing only)

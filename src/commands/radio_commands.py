@@ -6,7 +6,7 @@ power management, and diagnostic utilities.
 """
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from prompt_toolkit import HTML
 
 from .base import CommandHandler, command
@@ -166,7 +166,7 @@ class RadioCommandHandler(CommandHandler):
         print_pt(f"Heartbeat Fails:   {self.radio.heartbeat_failures}")
 
         hb_time = int(
-            (datetime.now() - self.radio.last_heartbeat).total_seconds()
+            (datetime.now(timezone.utc) - self.radio.last_heartbeat).total_seconds()
         )
         print_pt(f"Last Heartbeat:    {hb_time}s ago")
 
