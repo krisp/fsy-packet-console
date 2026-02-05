@@ -204,7 +204,7 @@ class APRSConsoleCommandHandler(CommandHandler):
                 print_error("Valid options: last, name, temp, humidity, pressure")
                 return
 
-        weather_stations = self.aprs_manager.get_all_weather_stations(sort_by=sort_by)
+        weather_stations = self.aprs_manager.get_weather_stations(sort_by=sort_by)
 
         if not weather_stations:
             print_info("No weather stations heard yet")
@@ -227,9 +227,15 @@ class APRSConsoleCommandHandler(CommandHandler):
 
         # Table rows
         for station in weather_stations:
-            fmt = self.aprs_manager.format_weather_table_row(station)
+            fmt = self.aprs_manager.format_weather(station)
+            # Calculate grid from lat/lon if available
+            if station.latitude and station.longitude:
+                grid = self.aprs_manager.latlon_to_maidenhead(station.latitude, station.longitude)
+            else:
+                grid = "---"
+            last_update = station.timestamp.strftime("%H:%M:%S")
             print_pt(
-                f"{fmt['callsign']:<12} {fmt['grid']:<9} {fmt['temp']:<7} {fmt['humidity']:<9} {fmt['pressure']:<9} {fmt['last_update']:<12}"
+                f"{fmt['station']:<12} {grid:<9} {fmt['temp']:<7} {fmt['humidity']:<9} {fmt['pressure']:<9} {last_update:<12}"
             )
 
     async def _position_commands(self, args):
@@ -238,7 +244,7 @@ class APRSConsoleCommandHandler(CommandHandler):
             print_error("Usage: aprs position list")
             return
 
-        positions = self.aprs_manager.get_all_positions()
+        positions = self.aprs_manager.get_position_reports()
 
         if not positions:
             print_info("No position reports received yet")
@@ -252,9 +258,10 @@ class APRSConsoleCommandHandler(CommandHandler):
 
         # Table rows
         for position in positions:
-            fmt = self.aprs_manager.format_position_table_row(position)
+            fmt = self.aprs_manager.format_position(position)
+            last_update = position.timestamp.strftime("%H:%M:%S")
             print_pt(
-                f"{fmt['callsign']:<12} {fmt['latitude']:<10} {fmt['longitude']:<10} {fmt['grid']:<9} {fmt['symbol']:<7} {fmt['last_update']:<12}"
+                f"{fmt['station']:<12} {fmt['latitude']:<10} {fmt['longitude']:<10} {fmt['grid']:<9} {fmt['symbol']:<7} {last_update:<12}"
             )
 
     async def _station_commands(self, args):
