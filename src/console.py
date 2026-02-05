@@ -2900,6 +2900,67 @@ class CommandProcessor:
         except Exception as e:
             print_error(f"Failed to send position beacon: {e}")
 
+    async def _send_aprs_message(self, to_call: str, message_text: str):
+        """Send an APRS message with automatic tracking and retry.
+
+        Args:
+            to_call: Destination callsign
+            message_text: Message content (max 67 characters)
+
+        This method:
+        1. Generates a unique message ID
+        2. Formats the APRS message packet
+        3. Transmits via radio
+        4. Adds to APRS manager for tracking/retry
+        """
+        try:
+            # Generate message ID (1-5 alphanumeric characters)
+            import random
+            import string
+            message_id = ''.join(random.choices(string.ascii_uppercase + string.digits, k=5))
+
+            # Format APRS message: :CALLSIGN :message{ID
+            # Pad callsign to 9 characters
+            to_padded = to_call.upper().ljust(9)
+            info = f":{to_padded}:{message_text}{{{message_id}"
+
+            # Get my callsign
+            mycall = self.tnc_config.get("MYCALL") or "NOCALL"
+
+            # Send via radio
+            await self.radio.send_aprs(mycall, info, to_call="APRS", path=None)
+
+            # Track in APRS manager for retry/ack handling
+            self.aprs_manager.add_sent_message(to_call.upper(), message_text, message_id)
+
+            print_info(f"📤 Message sent to {to_call}: {message_text}")
+
+        except Exception as e:
+            print_error(f"Failed to send APRS message: {e}")
+
+    async def _send_aprs_ack(self, to_call: str, message_id: str):
+        """Send an APRS acknowledgment for a received message.
+
+        Args:
+            to_call: Callsign to send ACK to
+            message_id: Message ID being acknowledged
+        """
+        try:
+            # Format APRS ACK: :CALLSIGN :ack{ID
+            to_padded = to_call.upper().ljust(9)
+            info = f":{to_padded}:ack{message_id}"
+
+            # Get my callsign
+            mycall = self.tnc_config.get("MYCALL") or "NOCALL"
+
+            # Send via radio
+            await self.radio.send_aprs(mycall, info, to_call="APRS", path=None)
+
+            print_debug(f"📥 ACK sent to {to_call} for message {message_id}", level=5)
+
+        except Exception as e:
+            print_error(f"Failed to send APRS ACK: {e}")
+
 
 # === Monitor Tasks ===
 
