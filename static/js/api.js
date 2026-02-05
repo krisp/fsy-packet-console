@@ -87,6 +87,16 @@ export class APRSApi {
     }
 
     /**
+     * Get GPS position
+     * @returns {Promise<Object>} GPS position data
+     */
+    async getGPS() {
+        const res = await fetch(`${this.baseUrl}/api/gps`);
+        if (!res.ok) throw new Error(`Failed to fetch GPS: ${res.statusText}`);
+        return res.json();
+    }
+
+    /**
      * Connect to Server-Sent Events stream for real-time updates
      * @param {Function} onEvent - Callback function(eventType, data)
      * @param {Function} onConnectionChange - Callback function(status) where status is 'connected', 'disconnected', or 'reconnecting'

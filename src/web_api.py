@@ -502,7 +502,6 @@ class APIHandlers:
             mylocation = self.get_mylocation()
             if mylocation:
                 try:
-                    from src.aprs_manager import APRSManager
                     lat, lon = maidenhead_to_latlon(mylocation)
                     return web.json_response({
                         "locked": True,

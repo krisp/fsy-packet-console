@@ -10,14 +10,18 @@ let currentSort = { column: 'callsign', ascending: true };
 let searchFilter = '';
 let dxOnlyFilter = false;
 let sse = null;
+let ourPosition = null; // Our GPS position {latitude, longitude}
 
 /**
  * Initialize the stations table page
  */
 async function init() {
     // Load initial data
-    await loadStations();
-    await loadStatus();
+    await Promise.all([
+        loadStations(),
+        loadStatus(),
+        loadGPSPosition()
+    ]);
 
     // Setup event listeners
     setupSortHandlers();
@@ -28,6 +32,59 @@ async function init() {
 
     // Connect to SSE for live updates
     connectSSE();
+}
+
+/**
+ * Load GPS position from API
+ */
+async function loadGPSPosition() {
+    try {
+        const data = await api.getGPS();
+        if (data && data.locked) {
+            ourPosition = {
+                latitude: data.latitude,
+                longitude: data.longitude
+            };
+        }
+    } catch (error) {
+        console.warn('Failed to load GPS position:', error);
+    }
+}
+
+/**
+ * Calculate distance between two points using Haversine formula
+ * @param {number} lat1 - First latitude
+ * @param {number} lon1 - First longitude
+ * @param {number} lat2 - Second latitude
+ * @param {number} lon2 - Second longitude
+ * @returns {number} Distance in miles
+ */
+function calculateDistance(lat1, lon1, lat2, lon2) {
+    const R = 3959; // Earth radius in miles
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+              Math.sin(dLon/2) * Math.sin(dLon/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+}
+
+/**
+ * Get distance for a station
+ * @param {Object} station - Station object
+ * @returns {number|null} Distance in miles or null if unavailable
+ */
+function getStationDistance(station) {
+    if (!ourPosition || !station.last_position) {
+        return null;
+    }
+    return calculateDistance(
+        ourPosition.latitude,
+        ourPosition.longitude,
+        station.last_position.latitude,
+        station.last_position.longitude
+    );
 }
 
 /**
@@ -205,6 +262,9 @@ function getSortValue(station, column) {
             return station.callsign.toLowerCase();
         case 'grid':
             return station.last_position?.grid_square || 'ZZZZZZ';
+        case 'distance':
+            const dist = getStationDistance(station);
+            return dist !== null ? dist : 999999; // Stations without distance sort last
         case 'device':
             return (station.device || 'ZZZZZZ').toLowerCase();
         case 'last_heard':
@@ -240,10 +300,12 @@ function getSortedFilteredStations() {
         );
     }
 
-    // Apply DX Only filter (heard_zero_hop = true)
+    // Apply DX Only filter (heard_zero_hop = true AND zero_hop_packet_count > 0)
+    // Both conditions required to exclude igated stations with stale data
     if (dxOnlyFilter) {
         filtered = filtered.filter(station =>
-            station.heard_zero_hop === true
+            station.heard_zero_hop === true &&
+            station.zero_hop_packet_count > 0
         );
     }
 
@@ -270,12 +332,14 @@ function renderTable() {
     const stations = getSortedFilteredStations();
 
     if (stations.length === 0) {
-        tbody.innerHTML = '<tr class="loading-row"><td colspan="10" class="loading-cell">No stations found</td></tr>';
+        tbody.innerHTML = '<tr class="loading-row"><td colspan="11" class="loading-cell">No stations found</td></tr>';
         return;
     }
 
     tbody.innerHTML = stations.map(station => {
         const grid = station.last_position?.grid_square?.substring(0, 6) || '—';
+        const dist = getStationDistance(station);
+        const distance = dist !== null ? `${dist.toFixed(1)} mi` : '—';
         const device = escapeHtml(station.device || '—');
         const lastHeard = formatTimestamp(station.last_heard);
         const packets = station.packets_heard || 0;
@@ -293,6 +357,7 @@ function renderTable() {
                     </a>
                 </td>
                 <td>${grid}</td>
+                <td class="numeric-cell">${distance}</td>
                 <td class="device-cell">${device}</td>
                 <td title="${escapeHtml(station.last_heard)}">${lastHeard}</td>
                 <td class="numeric-cell">${packets}</td>
