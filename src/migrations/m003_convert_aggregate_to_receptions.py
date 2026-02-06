@@ -163,11 +163,10 @@ def migrate(aprs_manager, console) -> Dict[str, Any]:
         if station.receptions:
             station.receptions.sort(key=lambda r: r.timestamp, reverse=True)
 
-            # Update first_heard and last_heard from receptions
-            # (These got set to migration time during replay, but should reflect actual packet times)
-            reception_times = [r.timestamp for r in station.receptions]
-            station.first_heard = min(reception_times)
-            station.last_heard = max(reception_times)
+            # Update first_heard and last_heard from sorted receptions (optimization)
+            # Sorted newest-first, so: first=newest (last_heard), last=oldest (first_heard)
+            station.last_heard = station.receptions[0].timestamp
+            station.first_heard = station.receptions[-1].timestamp
 
     print(f"[m003] Finalization complete")
 

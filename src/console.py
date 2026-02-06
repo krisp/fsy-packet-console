@@ -442,6 +442,9 @@ class FrameHistory:
             # Restore frame counter (important to maintain sequential numbering)
             self.frame_counter = data.get('frame_counter', 0)
 
+            # Pre-compute local timezone once (optimization for legacy naive timestamps)
+            local_tz = datetime.now(timezone.utc).astimezone().tzinfo
+
             # Restore frames
             corrupted = 0
             for frame_data in data.get('frames', []):
@@ -449,8 +452,8 @@ class FrameHistory:
                     # Load timestamp and make timezone-aware if needed
                     ts = datetime.fromisoformat(frame_data['timestamp'])
                     if ts.tzinfo is None:
-                        # Naive timestamp from old data - assume local time
-                        ts = ts.replace(tzinfo=datetime.now().astimezone().tzinfo)
+                        # Naive timestamp from old data - treat as local time, make aware
+                        ts = ts.replace(tzinfo=local_tz)
 
                     entry = FrameHistoryEntry(
                         timestamp=ts,

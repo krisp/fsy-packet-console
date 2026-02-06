@@ -46,6 +46,7 @@ class APRSConsoleCommandHandler(CommandHandler):
             print_info("  aprs station list [name|packets|last|hops] - List all heard stations (default: last)")
             print_info("  aprs station dx                    - DX list (zero-hop stations by distance)")
             print_info("  aprs station show <callsign>       - Show detailed station info")
+            print_info("  aprs station receptions <callsign> [N] - Show reception events (last N, default 20)")
             print_info("  aprs database save                 - Manually save database to disk")
             print_info("  aprs database clear                - Clear entire APRS database")
             print_info("  aprs database prune <days>         - Remove entries older than N days")
@@ -272,7 +273,7 @@ class APRSConsoleCommandHandler(CommandHandler):
     async def _station_commands(self, args):
         """Handle station listing and detail commands."""
         if not args:
-            print_error("Usage: aprs station <list|dx|show> ...")
+            print_error("Usage: aprs station <list|dx|show|receptions> ...")
             return
 
         action = args[0].lower()
@@ -283,9 +284,11 @@ class APRSConsoleCommandHandler(CommandHandler):
             await self._station_dx(args[1:])
         elif action == "show":
             await self._station_show(args[1:])
+        elif action in ("receptions", "events", "rx"):
+            await self._station_receptions(args[1:])
         else:
             print_error(f"Unknown station action: {action}")
-            print_error("Use: list, dx, show")
+            print_error("Use: list, dx, show, receptions")
 
     async def _station_list(self, args):
         """List all heard stations."""
@@ -428,6 +431,125 @@ class APRSConsoleCommandHandler(CommandHandler):
             threshold = 0.3  # Default fallback
         detail = APRSFormatters.format_station_detail(station, pressure_threshold=threshold)
         print_pt(detail)
+
+    async def _station_receptions(self, args):
+        """Show reception event history for a station."""
+        if not args:
+            print_error("Usage: aprs station receptions <callsign> [N]")
+            print_error("Example: aprs station receptions N1TKS 50")
+            print_error("Shows last N reception events (default: 20)")
+            return
+
+        callsign = args[0].upper()
+        station = self.aprs_manager.get_station(callsign)
+
+        if not station:
+            print_error(f"Station {callsign} not found")
+            print_info("Use 'aprs station list' to see all stations")
+            return
+
+        # Parse optional limit
+        limit = 20  # Default
+        if len(args) > 1:
+            try:
+                limit = int(args[1])
+                if limit < 1:
+                    print_error("Limit must be at least 1")
+                    return
+                if limit > 200:
+                    print_warning(f"Limiting to 200 (max stored)")
+                    limit = 200
+            except ValueError:
+                print_error(f"Invalid number: {args[1]}")
+                return
+
+        if not station.receptions:
+            print_info(f"No reception events recorded for {callsign}")
+            return
+
+        # Sort receptions newest-first before displaying (handles new packets added after migration)
+        sorted_receptions = sorted(station.receptions, key=lambda r: r.timestamp, reverse=True)
+        receptions = sorted_receptions[:limit]
+        total_count = len(station.receptions)
+
+        print_header(f"Reception Events: {callsign} (Showing {len(receptions)} of {total_count})")
+
+        # Table header
+        print_pt(HTML("<b>Time                 Type      Hops  Direct  Relay      Path</b>"))
+        print_pt(HTML("<gray>────────────────────────────────────────────────────────────────────────────────</gray>"))
+
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+
+        for i, rx in enumerate(receptions, 1):
+            # Format timestamp with relative time
+            time_diff = now - rx.timestamp
+            if time_diff.total_seconds() < 60:
+                time_str = "just now"
+            elif time_diff.total_seconds() < 3600:
+                mins = int(time_diff.total_seconds() / 60)
+                time_str = f"{mins}m ago"
+            elif time_diff.total_seconds() < 86400:
+                hours = int(time_diff.total_seconds() / 3600)
+                time_str = f"{hours}h ago"
+            else:
+                days = int(time_diff.total_seconds() / 86400)
+                time_str = f"{days}d ago"
+
+            # Format timestamp in LOCAL time (convert from UTC storage)
+            local_ts = rx.timestamp.astimezone()  # Converts to system local timezone
+            ts = local_ts.strftime("%m/%d %H:%M:%S")
+            timestamp_display = f"{ts} ({time_str:>8})"
+
+            # Packet type (truncated to 9 chars)
+            pkt_type = (rx.packet_type or "unknown")[:9]
+
+            # Hop count
+            if rx.hop_count == 999:
+                hops_str = "iGate"
+            elif rx.hop_count == 0:
+                hops_str = "0"
+            else:
+                hops_str = str(rx.hop_count)
+
+            # Direct RF indicator
+            direct_str = "✓" if rx.direct_rf else "✗"
+
+            # Relay (iGate callsign)
+            relay_str = (rx.relay_call or "-")[:10]
+
+            # Digipeater path (truncated to fit)
+            if rx.digipeater_path:
+                path_str = ",".join(rx.digipeater_path)
+                if len(path_str) > 35:
+                    path_str = path_str[:32] + "..."
+            else:
+                path_str = "-"
+
+            # Color coding based on type
+            if rx.hop_count == 0:
+                # Zero-hop (direct RF, no digipeaters) - green
+                color = "green"
+            elif rx.direct_rf:
+                # RF with digipeaters - yellow
+                color = "yellow"
+            else:
+                # iGate - blue
+                color = "cyan"
+
+            line = f"<{color}>{timestamp_display:20} {pkt_type:9} {hops_str:5} {direct_str:7} {relay_str:10} {path_str}</{color}>"
+            print_pt(HTML(line))
+
+        # Summary footer
+        print_pt(HTML("<gray>────────────────────────────────────────────────────────────────────────────────</gray>"))
+
+        # Calculate statistics
+        zero_hop_count = sum(1 for r in station.receptions if r.hop_count == 0)
+        rf_count = sum(1 for r in station.receptions if r.direct_rf)
+        igate_count = sum(1 for r in station.receptions if not r.direct_rf)
+
+        stats = f"Total: {total_count} receptions | Zero-hop: {zero_hop_count} | RF: {rf_count} | iGate: {igate_count}"
+        print_info(stats)
 
     async def _database_commands(self, args):
         """Handle database operations."""
