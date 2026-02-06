@@ -3105,16 +3105,45 @@ def parse_and_track_aprs_frame(complete_frame, radio, timestamp=None, frame_numb
             # Q constructs are exactly 3 chars: q + two uppercase (qAC, qAO, qAR, qAS, qAX, qAZ, qAU)
             # Reference: http://www.aprs-is.net/q.aspx
             Q_CONSTRUCTS = {'QAC', 'QAO', 'QAR', 'QAS', 'QAX', 'QAZ', 'QAU'}
-            result['digipeater_path'] = [
+
+            # Filter Q constructs first
+            filtered_path = [
                 digi for digi in raw_path
                 if digi.upper().rstrip('*') not in Q_CONSTRUCTS
             ]
 
-            # Log when Q constructs are filtered (indicates misbehaving iGate)
-            filtered_out = [d for d in raw_path if d.upper().rstrip('*') in Q_CONSTRUCTS]
-            if filtered_out and constants.DEBUG:
+            # Filter iGate trace callsigns (appear AFTER unused WIDE/RELAY aliases)
+            # Proper path order: used digis (*), then unused aliases (WIDE2-1)
+            # Trace callsigns appear AFTER unused aliases (bad iGate behavior)
+            # Find first unused WIDE/RELAY and truncate path there
+            final_path = []
+            for i, digi in enumerate(filtered_path):
+                digi_upper = digi.upper().rstrip('*')
+                is_unused_alias = (
+                    not digi.endswith('*') and
+                    (digi_upper.startswith('WIDE') or digi_upper.startswith('RELAY'))
+                )
+                if is_unused_alias:
+                    # Include the unused alias, but drop everything after it
+                    final_path.append(digi)
+                    break
+                else:
+                    final_path.append(digi)
+
+            result['digipeater_path'] = final_path
+
+            # Log when Q constructs or traces are filtered (indicates misbehaving iGate)
+            filtered_q = [d for d in raw_path if d.upper().rstrip('*') in Q_CONSTRUCTS]
+            filtered_trace = filtered_path[len(final_path):] if len(final_path) < len(filtered_path) else []
+
+            if filtered_q and constants.DEBUG:
                 print_debug(
-                    f"Filtered Q construct(s) from path: {filtered_out} (bad iGate behavior)",
+                    f"Filtered Q construct(s) from path: {filtered_q} (bad iGate behavior)",
+                    level=2
+                )
+            if filtered_trace and constants.DEBUG:
+                print_debug(
+                    f"Filtered iGate trace callsign(s) from path: {filtered_trace} (bad iGate behavior)",
                     level=2
                 )
 
@@ -3172,8 +3201,9 @@ def parse_and_track_aprs_frame(complete_frame, radio, timestamp=None, frame_numb
         result['is_duplicate'] = radio.aprs_manager.duplicate_detector.is_duplicate(parse_call, parse_info, timestamp_float)
 
         # Record digipeater paths even for duplicates (improves coverage accuracy)
+        # Pass relay information to correctly mark third-party duplicates
         if result['is_duplicate'] and result['digipeater_path']:
-            radio.aprs_manager.duplicate_detector.record_path(parse_call, result['digipeater_path'], timestamp=timestamp_float)
+            radio.aprs_manager.duplicate_detector.record_path(parse_call, result['digipeater_path'], timestamp=timestamp_float, frame_number=frame_number, relay_call=result.get('relay'))
 
         # Parse all APRS types (updates database in aprs_manager)
         # This happens even for duplicates to ensure tracking

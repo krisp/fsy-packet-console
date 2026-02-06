@@ -91,7 +91,7 @@ class DuplicateDetector:
         return False
 
     def record_path(self, callsign: str, digipeater_path: List[str],
-                   stations_dict: Dict = None, timestamp: float = None):
+                   stations_dict: Dict = None, timestamp: float = None, frame_number: int = None, relay_call: str = None):
         """Record digipeater paths for a station (used even for duplicate packets).
 
         This lightweight method ONLY updates digipeater tracking without full packet
@@ -106,6 +106,9 @@ class DuplicateDetector:
             callsign: Station callsign
             digipeater_path: List of digipeater callsigns from AX.25 path
             stations_dict: Optional reference to stations dictionary for legacy support
+            timestamp: Optional timestamp for the packet (used by migrations)
+            frame_number: Optional frame buffer reference number
+            relay_call: Optional relay station callsign for third-party packets
         """
         # Use provided dict or stored reference
         # NOTE: For duplicates, we still want to track digipeater paths for coverage analysis.
@@ -133,13 +136,14 @@ class DuplicateDetector:
 
             # Use _get_or_create_station to track the path via ReceptionEvent
             # Mark as duplicate so packets_heard doesn't increment
+            # Pass relay_call if provided (third-party packets can be duplicates too!)
             manager._get_or_create_station(
                 callsign=callsign,
-                relay_call=None,  # Duplicates are RF paths, not third-party
+                relay_call=relay_call,  # Pass through relay info (None for RF, iGate for third-party)
                 hop_count=len(digipeater_path),  # Estimate based on path length
                 is_duplicate=True,  # Don't increment packet count
                 digipeater_path=digipeater_path,
                 packet_type="unknown",  # We don't know the type for duplicates
-                frame_number=None,
+                frame_number=frame_number,  # Preserve frame number for migration tracking
                 timestamp=timestamp_dt,  # Pass historical timestamp
             )

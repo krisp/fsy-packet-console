@@ -190,7 +190,12 @@ class WebServer:
         response.headers['Cache-Control'] = 'no-cache'
         response.headers['Connection'] = 'keep-alive'
 
-        await response.prepare(request)
+        try:
+            await response.prepare(request)
+        except (ConnectionResetError, aiohttp.ClientConnectionResetError):
+            # Client disconnected before we could send headers - this is normal
+            # (client navigated away, network issue, etc.) - exit gracefully
+            return response
 
         # Create queue for this client
         queue = asyncio.Queue()
@@ -223,7 +228,7 @@ class WebServer:
         except asyncio.CancelledError:
             pass
         except (ConnectionResetError, aiohttp.ClientConnectionResetError):
-            # Client disconnected during initial write
+            # Client disconnected during initial write - normal, exit gracefully
             pass
         finally:
             self.sse_queues.discard(queue)

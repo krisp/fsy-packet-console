@@ -908,6 +908,17 @@ class APRSManager:
                     if not self.stations[digi_upper].is_digipeater:
                         self.stations[digi_upper].is_digipeater = True
 
+            # Track digipeater coverage for the web UI
+            # The first digipeater with an asterisk (*) is the one that heard the station directly
+            # Multi-hop paths are fine - we just track the first hop
+            # This is used by get_digipeater_coverage() for the web UI coverage circles
+            if (not relay_call and  # Only direct RF (not iGate packets)
+                len(digipeater_path) >= 1 and
+                digipeater_path[0].endswith('*')):  # First digi has repeated the packet
+                first_digi = digipeater_path[0].upper().rstrip('*')
+                if first_digi and first_digi not in self.stations[callsign_upper].digipeaters_heard_by:
+                    self.stations[callsign_upper].digipeaters_heard_by.append(first_digi)
+
         return self.stations[callsign_upper]
 
     def parse_third_party(
