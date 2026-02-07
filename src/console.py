@@ -20,6 +20,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List
 
+# Try to use ujson for faster serialization (3-5x speedup)
+try:
+    import ujson
+    HAS_UJSON = True
+except ImportError:
+    HAS_UJSON = False
+
 from bleak import BleakClient, BleakScanner
 from prompt_toolkit import HTML, PromptSession
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
@@ -401,7 +408,11 @@ class FrameHistory:
             # Write compressed JSON
             temp_file = self.BUFFER_FILE + ".tmp"
             with gzip.open(temp_file, 'wt', encoding='utf-8') as f:
-                json.dump(data, f)
+                # Use ujson for 3-5x faster serialization if available
+                if HAS_UJSON:
+                    f.write(ujson.dumps(data, ensure_ascii=False))
+                else:
+                    json.dump(data, f)
 
             # Atomic rename
             os.replace(temp_file, self.BUFFER_FILE)
@@ -438,7 +449,11 @@ class FrameHistory:
             result['file_size_kb'] = os.path.getsize(self.BUFFER_FILE) / 1024
 
             with gzip.open(self.BUFFER_FILE, 'rt', encoding='utf-8') as f:
-                data = json.load(f)
+                # Use ujson for faster deserialization if available
+                if HAS_UJSON:
+                    data = ujson.loads(f.read())
+                else:
+                    data = json.load(f)
 
             # Restore frame counter (important to maintain sequential numbering)
             self.frame_counter = data.get('frame_counter', 0)
