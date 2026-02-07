@@ -3929,8 +3929,8 @@ async def command_loop(radio, auto_tnc=False, auto_connect=None, serial_mode=Fal
 
 
 async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
-               serial_port=None, serial_baud=9600, tcp_host=None, tcp_port=8001,
-               radio_mac=None):
+               serial_port=None, serial_baud=9600, init_kiss=False,
+               tcp_host=None, tcp_port=8001, radio_mac=None):
     # Enable debug mode if requested via command line
     if auto_debug:
         constants.DEBUG_LEVEL = 2
@@ -3974,6 +3974,15 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
             transport = SerialTransport(serial_port, serial_baud, tnc_queue)
             await transport.connect()
             print_info(f"Serial port connected: {serial_port}")
+
+            # Initialize KISS mode if requested
+            if init_kiss:
+                print_info("Initializing TNC into KISS mode...")
+                success = await transport.initialize_kiss_mode()
+                if success:
+                    print_info("TNC is in KISS mode and ready")
+                else:
+                    print_warning("KISS mode initialization may have failed - continuing anyway")
 
         except Exception as e:
             print_error(f"Failed to open serial port: {e}")

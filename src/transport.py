@@ -9,6 +9,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Optional, Callable, Any
 from src.constants import TNC_TX_UUID, TNC_RX_UUID, TNC_COMMAND_UUID, TNC_INDICATION_UUID
+from src.utils import print_info, print_debug, print_warning, print_error
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,7 @@ class BLETransport(TransportBase):
         """Write KISS frame via BLE TNC_TX characteristic."""
         try:
             if not self.client or not self.client.is_connected:
-                logger.error("BLE client not connected")
+                print_error("BLE client not connected")
                 return False
 
             # Reset response event if expecting a response
@@ -105,13 +106,13 @@ class BLETransport(TransportBase):
                     await asyncio.wait_for(self._response_event.wait(), timeout=5.0)
                     return self._last_response is not None
                 except asyncio.TimeoutError:
-                    logger.warning("Timeout waiting for BLE response")
+                    print_warning("Timeout waiting for BLE response")
                     return False
 
             return True
 
         except Exception as e:
-            logger.error(f"BLE write error: {e}")
+            print_error(f"BLE write error: {e}")
             return False
 
     async def send_tnc_data(self, data: bytes) -> None:
@@ -152,11 +153,11 @@ class BLETransport(TransportBase):
                 response = await asyncio.wait_for(self.rx_queue.get(), timeout=2.0)
                 return response
             except asyncio.TimeoutError:
-                logger.warning(f"Command {command} timeout")
+                print_warning(f"Command {command} timeout")
                 return None
 
         except Exception as e:
-            logger.error(f"Command error: {e}")
+            print_error(f"Command error: {e}")
             return None
 
     async def get_status(self) -> Optional[dict]:
@@ -197,7 +198,7 @@ class BLETransport(TransportBase):
         try:
             self.rx_queue.put_nowait(bytes(data))
         except asyncio.QueueFull:
-            logger.warning("RX queue full, dropping data")
+            print_warning("RX queue full, dropping data")
 
     async def close(self) -> None:
         """Close BLE connection."""
@@ -230,7 +231,7 @@ class SerialTransport(TransportBase):
 
         # Validate baud rate
         if baud not in self.VALID_BAUD_RATES:
-            logger.warning(f"Unusual baud rate {baud}, valid rates: {self.VALID_BAUD_RATES}")
+            print_warning(f"Unusual baud rate {baud}, valid rates: {self.VALID_BAUD_RATES}")
 
     async def connect(self) -> None:
         """Open serial port and start read loop."""
@@ -252,22 +253,22 @@ class SerialTransport(TransportBase):
             # Start background read task
             self._read_task = asyncio.create_task(self._read_loop())
 
-            logger.info(f"Serial port opened: {self.port} @ {self.baud} baud")
+            print_info(f"Serial port opened: {self.port} @ {self.baud} baud")
 
         except ImportError:
-            logger.error("pyserial-asyncio not installed. Run: pip install pyserial-asyncio")
+            print_error("pyserial-asyncio not installed. Run: pip install pyserial-asyncio")
             raise
         except FileNotFoundError:
-            logger.error(f"Serial port not found: {self.port}")
+            print_error(f"Serial port not found: {self.port}")
             self._suggest_available_ports()
             raise
         except PermissionError:
-            logger.error(f"Permission denied: {self.port}")
-            logger.info("Try: sudo usermod -a -G dialout $USER")
-            logger.info("Then log out and log back in")
+            print_error(f"Permission denied: {self.port}")
+            print_info("Try: sudo usermod -a -G dialout $USER")
+            print_info("Then log out and log back in")
             raise
         except Exception as e:
-            logger.error(f"Failed to open serial port: {e}")
+            print_error(f"Failed to open serial port: {e}")
             raise
 
     def _suggest_available_ports(self) -> None:
@@ -276,17 +277,153 @@ class SerialTransport(TransportBase):
             import serial.tools.list_ports
             ports = list(serial.tools.list_ports.comports())
             if ports:
-                logger.info("Available serial ports:")
+                print_info("Available serial ports:")
                 for port in ports:
-                    logger.info(f"  {port.device}: {port.description}")
+                    print_info(f"  {port.device}: {port.description}")
             else:
-                logger.info("No serial ports found")
+                print_info("No serial ports found")
         except Exception:
             pass
 
+    async def initialize_kiss_mode(self, timeout: float = 5.0) -> bool:
+        """
+        Initialize TNC into KISS mode if it's in command mode.
+
+        Some TNCs power up in command mode and need to be switched to KISS mode.
+        This method detects command mode and sends the initialization sequence.
+
+        Standard sequence for most TNCs:
+        1. Send CR to get command prompt
+        2. Send "INTFACE KISS" command
+        3. Send "RESET" command to restart in KISS mode
+
+        Args:
+            timeout: Seconds to wait for responses
+
+        Returns:
+            True if TNC is in KISS mode (or successfully initialized)
+            False if initialization failed
+        """
+        if not self.writer or not self.reader:
+            print_error("Serial port not connected, cannot initialize KISS mode")
+            return False
+
+        print_info("Checking if TNC needs KISS mode initialization...")
+
+        try:
+            # Pause the read loop temporarily to avoid queue interference
+            # We'll read responses directly during initialization
+            read_task_was_running = self._read_task is not None and not self._read_task.done()
+            if read_task_was_running:
+                self._read_task.cancel()
+                try:
+                    await self._read_task
+                except asyncio.CancelledError:
+                    pass
+
+            # Step 1: Send CR to check for command prompt
+            print_debug("Sending CR to check for command prompt...")
+            self.writer.write(b'\r')
+            await self.writer.drain()
+
+            # Wait briefly and read any response
+            await asyncio.sleep(0.5)
+            response = b''
+            try:
+                response = await asyncio.wait_for(
+                    self.reader.read(1024),
+                    timeout=1.0
+                )
+            except asyncio.TimeoutError:
+                # No response might mean already in KISS mode
+                print_debug("No response to CR - TNC may already be in KISS mode")
+
+            # Check if we got a command prompt
+            response_str = response.decode('ascii', errors='ignore').lower()
+            print_debug(f"TNC response: {repr(response_str[:100])}")
+
+            # Look for command prompt indicators
+            if 'cmd:' in response_str or 'command' in response_str or '>' in response_str:
+                print_info("TNC is in command mode - switching to KISS mode...")
+
+                # Step 2: Send INTFACE KISS command
+                print_debug("Sending: INTFACE KISS")
+                self.writer.write(b'INTFACE KISS\r')
+                await self.writer.drain()
+                await asyncio.sleep(0.5)
+
+                # Read acknowledgment
+                try:
+                    ack = await asyncio.wait_for(
+                        self.reader.read(1024),
+                        timeout=1.0
+                    )
+                    print_debug(f"INTFACE response: {repr(ack[:100])}")
+                except asyncio.TimeoutError:
+                    print_debug("No acknowledgment from INTFACE KISS")
+
+                # Step 3: Send RESET command
+                print_debug("Sending: RESET")
+                self.writer.write(b'RESET\r')
+                await self.writer.drain()
+
+                # Wait for TNC to restart (typically takes 2-3 seconds)
+                print_info("Waiting for TNC to restart in KISS mode...")
+                await asyncio.sleep(3.0)
+
+                # Drain any startup messages
+                try:
+                    startup_msg = await asyncio.wait_for(
+                        self.reader.read(4096),
+                        timeout=1.0
+                    )
+                    print_debug(f"TNC startup messages: {len(startup_msg)} bytes")
+                except asyncio.TimeoutError:
+                    pass
+
+                print_info("TNC should now be in KISS mode")
+                success = True
+
+            elif b'\xc0' in response:
+                # KISS frame delimiter detected - already in KISS mode
+                print_info("TNC is already in KISS mode (detected KISS frames)")
+                # Put the data back in the queue for processing
+                if response:
+                    try:
+                        self.tnc_queue.put_nowait(response)
+                    except asyncio.QueueFull:
+                        print_warning("TNC queue full during KISS detection")
+                success = True
+
+            else:
+                # No clear indication - assume KISS mode or unsupported TNC
+                print_info("No command prompt detected - assuming TNC is in KISS mode")
+                if response:
+                    try:
+                        self.tnc_queue.put_nowait(response)
+                    except asyncio.QueueFull:
+                        print_warning("TNC queue full during KISS detection")
+                success = True
+
+            # Restart the read loop
+            if read_task_was_running:
+                self._read_task = asyncio.create_task(self._read_loop())
+
+            return success
+
+        except Exception as e:
+            print_error(f"Error during KISS mode initialization: {e}")
+            # Restart read loop on error
+            if read_task_was_running:
+                try:
+                    self._read_task = asyncio.create_task(self._read_loop())
+                except Exception:
+                    pass
+            return False
+
     async def _read_loop(self) -> None:
         """Background task to read from serial port and push to TNC queue."""
-        logger.info("Serial read loop started")
+        print_info("Serial read loop started")
 
         try:
             while self._connected and self.reader:
@@ -296,7 +433,7 @@ class SerialTransport(TransportBase):
 
                     if not data:
                         # EOF or disconnect
-                        logger.warning("Serial port disconnected")
+                        print_warning("Serial port disconnected")
                         self._connected = False
                         break
 
@@ -304,14 +441,14 @@ class SerialTransport(TransportBase):
                     await self.tnc_queue.put(data)
 
                 except asyncio.CancelledError:
-                    logger.info("Serial read loop cancelled")
+                    print_info("Serial read loop cancelled")
                     break
                 except Exception as e:
-                    logger.error(f"Serial read error: {e}")
+                    print_error(f"Serial read error: {e}")
                     await asyncio.sleep(1)  # Avoid tight loop on errors
 
         finally:
-            logger.info("Serial read loop stopped")
+            print_info("Serial read loop stopped")
 
     async def write_kiss_frame(self, data: bytes, response: bool = True) -> bool:
         """
@@ -322,7 +459,7 @@ class SerialTransport(TransportBase):
         """
         try:
             if not self._connected or not self.writer:
-                logger.error("Serial port not connected")
+                print_error("Serial port not connected")
                 return False
 
             # Write data
@@ -332,7 +469,7 @@ class SerialTransport(TransportBase):
             return True
 
         except Exception as e:
-            logger.error(f"Serial write error: {e}")
+            print_error(f"Serial write error: {e}")
             self._connected = False
             return False
 
@@ -343,7 +480,7 @@ class SerialTransport(TransportBase):
                 self.writer.write(data)
                 await self.writer.drain()
             except Exception as e:
-                logger.error(f"Serial send error: {e}")
+                print_error(f"Serial send error: {e}")
                 self._connected = False
 
     async def close(self) -> None:
@@ -363,7 +500,7 @@ class SerialTransport(TransportBase):
             self.writer.close()
             await self.writer.wait_closed()
 
-        logger.info(f"Serial port closed: {self.port}")
+        print_info(f"Serial port closed: {self.port}")
 
 
 class TCPTransport(TransportBase):
@@ -394,7 +531,7 @@ class TCPTransport(TransportBase):
             True if connection successful, False otherwise
         """
         try:
-            logger.info(f"Connecting to KISS TNC at {self.host}:{self.port}...")
+            print_info(f"Connecting to KISS TNC at {self.host}:{self.port}...")
 
             self.reader, self.writer = await asyncio.open_connection(
                 self.host,
@@ -406,23 +543,23 @@ class TCPTransport(TransportBase):
             # Start background read loop
             self._read_task = asyncio.create_task(self._read_loop())
 
-            logger.info(f"Connected to KISS TNC at {self.host}:{self.port}")
+            print_info(f"Connected to KISS TNC at {self.host}:{self.port}")
             return True
 
         except ConnectionRefusedError:
-            logger.error(f"Connection refused: {self.host}:{self.port}")
-            logger.error("Is Direwolf or KISS TNC server running?")
+            print_error(f"Connection refused: {self.host}:{self.port}")
+            print_error("Is Direwolf or KISS TNC server running?")
             return False
         except OSError as e:
-            logger.error(f"Cannot connect to {self.host}:{self.port}: {e}")
+            print_error(f"Cannot connect to {self.host}:{self.port}: {e}")
             return False
         except Exception as e:
-            logger.error(f"TCP connection error: {e}")
+            print_error(f"TCP connection error: {e}")
             return False
 
     async def _read_loop(self) -> None:
         """Background task to read data from TCP socket."""
-        logger.info("TCP read loop started")
+        print_info("TCP read loop started")
 
         try:
             while self._connected and self.reader:
@@ -432,7 +569,7 @@ class TCPTransport(TransportBase):
 
                     if not data:
                         # EOF - connection closed by remote
-                        logger.warning("TCP connection closed by remote TNC")
+                        print_warning("TCP connection closed by remote TNC")
                         self._connected = False
                         break
 
@@ -440,14 +577,14 @@ class TCPTransport(TransportBase):
                     await self.tnc_queue.put(data)
 
                 except asyncio.CancelledError:
-                    logger.info("TCP read loop cancelled")
+                    print_info("TCP read loop cancelled")
                     break
                 except Exception as e:
-                    logger.error(f"TCP read error: {e}")
+                    print_error(f"TCP read error: {e}")
                     await asyncio.sleep(1)  # Avoid tight loop on errors
 
         finally:
-            logger.info("TCP read loop stopped")
+            print_info("TCP read loop stopped")
 
     async def write_kiss_frame(self, data: bytes, response: bool = True) -> bool:
         """
@@ -465,7 +602,7 @@ class TCPTransport(TransportBase):
         """
         try:
             if not self._connected or not self.writer:
-                logger.error("TCP connection not active")
+                print_error("TCP connection not active")
                 return False
 
             # Write data
@@ -475,7 +612,7 @@ class TCPTransport(TransportBase):
             return True
 
         except Exception as e:
-            logger.error(f"TCP write error: {e}")
+            print_error(f"TCP write error: {e}")
             self._connected = False
             return False
 
@@ -486,7 +623,7 @@ class TCPTransport(TransportBase):
                 self.writer.write(data)
                 await self.writer.drain()
             except Exception as e:
-                logger.error(f"TCP send error: {e}")
+                print_error(f"TCP send error: {e}")
                 self._connected = False
 
     async def close(self) -> None:
@@ -512,4 +649,4 @@ class TCPTransport(TransportBase):
         self.reader = None
         self.writer = None
 
-        logger.info(f"TCP connection closed: {self.host}:{self.port}")
+        print_info(f"TCP connection closed: {self.host}:{self.port}")

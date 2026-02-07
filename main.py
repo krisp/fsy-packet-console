@@ -115,6 +115,11 @@ if __name__ == "__main__":
         help="Serial baud rate (default: 9600)",
     )
     parser.add_argument(
+        "--init-kiss",
+        action="store_true",
+        help="Initialize TNC into KISS mode on startup (for TNCs that power up in command mode)",
+    )
+    parser.add_argument(
         "-k",
         "--kiss-tcp",
         metavar="HOST:PORT",
@@ -191,6 +196,7 @@ if __name__ == "__main__":
             auto_debug=args.debug,
             serial_port=args.serial,
             serial_baud=args.baud,
+            init_kiss=args.init_kiss,
             tcp_host=tcp_host,
             tcp_port=tcp_port,
             radio_mac=args.radio_mac,
