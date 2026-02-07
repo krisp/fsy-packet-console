@@ -775,16 +775,20 @@ class APIHandlers:
     async def get_digipeater_heatmap(self, request: web.Request) -> web.Response:
         """GET /api/digipeater/heatmap - Get time-of-day activity heatmap.
 
+        Times are converted to local timezone for display (e.g., 6 PM shows as
+        6 PM local time, not UTC).
+
         Query params:
             days: Number of days to look back (default: 7)
 
         Returns:
             {
                 "grid": [
-                    [hour0_day0, hour1_day0, ..., hour23_day0],  # Sunday
-                    [hour0_day1, hour1_day1, ..., hour23_day1],  # Monday
+                    [hour0_day0, hour1_day0, ..., hour23_day0],  # Monday (weekday=0)
+                    [hour0_day1, hour1_day1, ..., hour23_day1],  # Tuesday (weekday=1)
                     ...
-                    [hour0_day6, hour1_day6, ..., hour23_day6]   # Saturday
+                    [hour0_day5, hour1_day5, ..., hour23_day5],  # Saturday (weekday=5)
+                    [hour0_day6, hour1_day6, ..., hour23_day6]   # Sunday (weekday=6)
                 ],
                 "max_value": int,
                 "total_packets": int
@@ -793,7 +797,7 @@ class APIHandlers:
         # Check if digipeater_stats exists
         if not hasattr(self.aprs, 'digipeater_stats') or self.aprs.digipeater_stats is None:
             return web.json_response({
-                "grid": [[0] * 24 for _ in range(7)],
+                "grid": [[0] * 24 for _ in range(7)],  # 7 days (Mon-Sun) x 24 hours
                 "max_value": 0,
                 "total_packets": 0
             })
@@ -811,8 +815,10 @@ class APIHandlers:
         heatmap = [[0] * 24 for _ in range(7)]
 
         for activity in activities:
-            day_of_week = activity.timestamp.weekday()  # 0=Monday, 6=Sunday
-            hour = activity.timestamp.hour
+            # Convert UTC timestamp to local time for display
+            local_time = activity.timestamp.astimezone()
+            day_of_week = local_time.weekday()  # 0=Monday, 6=Sunday
+            hour = local_time.hour
             heatmap[day_of_week][hour] += 1
 
         # Find max value for scaling

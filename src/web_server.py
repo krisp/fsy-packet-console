@@ -238,7 +238,7 @@ class WebServer:
 
                 try:
                     await response.write(sse_data.encode('utf-8'))
-                except (ConnectionResetError, aiohttp.ClientConnectionResetError):
+                except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
                     # Client disconnected (e.g., navigated away) - exit gracefully
                     break
                 except Exception:
@@ -247,7 +247,7 @@ class WebServer:
 
         except asyncio.CancelledError:
             pass
-        except (ConnectionResetError, aiohttp.ClientConnectionResetError):
+        except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             # Client disconnected during initial write - normal, exit gracefully
             pass
         finally:

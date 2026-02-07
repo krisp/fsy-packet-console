@@ -370,8 +370,9 @@ export function renderActivityHeatmap(canvasId, data) {
     const cellWidth = width / cols;
     const cellHeight = height / rows;
 
-    // Day labels
-    const dayLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    // Day labels (Monday-first to match Python's weekday())
+    // Backend uses: 0=Monday, 1=Tuesday, ..., 5=Saturday, 6=Sunday
+    const dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
     // Use provided grid directly (already in 7x24 format from API)
     const grid = data && Array.isArray(data) && data.length === 7

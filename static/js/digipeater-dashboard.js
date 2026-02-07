@@ -240,6 +240,50 @@ export class DigipeaterDashboard {
         }
 
         console.log('Charts created successfully');
+
+        // Populate the top digipeaters table
+        this.updateTopDigipeatersTable();
+    }
+
+    /**
+     * Update the top digipeaters details table
+     */
+    updateTopDigipeatersTable() {
+        const tbody = document.getElementById('digipeaters-tbody');
+        if (!tbody || !this.data.topStations || !this.data.topStations.stations) {
+            return;
+        }
+
+        const stations = this.data.topStations.stations;
+        if (stations.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" class="loading-cell">No digipeater activity yet</td></tr>';
+            return;
+        }
+
+        // Calculate total packets for percentage
+        const totalPackets = stations.reduce((sum, s) => sum + s.count, 0);
+
+        // Build table rows
+        let html = '';
+        stations.forEach((station, index) => {
+            const rank = index + 1;
+            const percentage = ((station.count / totalPackets) * 100).toFixed(1);
+            const lastHeard = new Date(station.last_heard).toLocaleString();
+            const frequency = 'N/A'; // Placeholder - could be looked up from station data
+
+            html += `
+                <tr>
+                    <td>${rank}</td>
+                    <td class="callsign-cell">${station.callsign}</td>
+                    <td>${station.count}</td>
+                    <td>${percentage}%</td>
+                    <td>${lastHeard}</td>
+                    <td>${frequency}</td>
+                </tr>
+            `;
+        });
+
+        tbody.innerHTML = html;
     }
 
     /**
