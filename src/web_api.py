@@ -684,18 +684,20 @@ class APIHandlers:
             range: Time range filter (default: '24h')
 
         Returns:
-            [
-                {
-                    "station": callsign,
-                    "count": int,
-                    "last_heard": ISO timestamp
-                },
-                ...
-            ]
+            {
+                "stations": [
+                    {
+                        "callsign": str,
+                        "count": int,
+                        "last_heard": ISO timestamp
+                    },
+                    ...
+                ]
+            }
         """
         # Check if digipeater_stats exists
         if not hasattr(self.aprs, 'digipeater_stats') or self.aprs.digipeater_stats is None:
-            return web.json_response([])
+            return web.json_response({"stations": []})
 
         stats = self.aprs.digipeater_stats
         limit = int(request.query.get('limit', '10'))
@@ -721,14 +723,14 @@ class APIHandlers:
         # Sort and limit
         top_stations = [
             {
-                "station": station,
+                "callsign": station,
                 "count": count,
                 "last_heard": serialize_datetime(station_last_heard[station])
             }
             for station, count in sorted(station_counts.items(), key=lambda x: x[1], reverse=True)[:limit]
         ]
 
-        return web.json_response(top_stations)
+        return web.json_response({"stations": top_stations})
 
     async def get_digipeater_path_usage(self, request: web.Request) -> web.Response:
         """GET /api/digipeater/path-usage - Get path type usage statistics.
@@ -738,16 +740,18 @@ class APIHandlers:
 
         Returns:
             {
-                "WIDE1-1": int,
-                "WIDE2-2": int,
-                "WIDE2-1": int,
-                "Direct": int,
-                "Other": int
+                "path_types": {
+                    "WIDE1-1": int,
+                    "WIDE2-2": int,
+                    "WIDE2-1": int,
+                    "Direct": int,
+                    "Other": int
+                }
             }
         """
         # Check if digipeater_stats exists
         if not hasattr(self.aprs, 'digipeater_stats') or self.aprs.digipeater_stats is None:
-            return web.json_response({})
+            return web.json_response({"path_types": {}})
 
         stats = self.aprs.digipeater_stats
         range_param = request.query.get('range', '24h')
@@ -766,7 +770,7 @@ class APIHandlers:
         for activity in activities:
             path_usage[activity.path_type] = path_usage.get(activity.path_type, 0) + 1
 
-        return web.json_response(path_usage)
+        return web.json_response({"path_types": path_usage})
 
     async def get_digipeater_heatmap(self, request: web.Request) -> web.Response:
         """GET /api/digipeater/heatmap - Get time-of-day activity heatmap.
@@ -776,7 +780,7 @@ class APIHandlers:
 
         Returns:
             {
-                "heatmap": [
+                "grid": [
                     [hour0_day0, hour1_day0, ..., hour23_day0],  # Sunday
                     [hour0_day1, hour1_day1, ..., hour23_day1],  # Monday
                     ...
@@ -789,7 +793,7 @@ class APIHandlers:
         # Check if digipeater_stats exists
         if not hasattr(self.aprs, 'digipeater_stats') or self.aprs.digipeater_stats is None:
             return web.json_response({
-                "heatmap": [[0] * 24 for _ in range(7)],
+                "grid": [[0] * 24 for _ in range(7)],
                 "max_value": 0,
                 "total_packets": 0
             })
@@ -815,7 +819,7 @@ class APIHandlers:
         max_value = max(max(row) for row in heatmap) if any(any(row) for row in heatmap) else 0
 
         return web.json_response({
-            "heatmap": heatmap,
+            "grid": heatmap,
             "max_value": max_value,
             "total_packets": len(activities)
         })

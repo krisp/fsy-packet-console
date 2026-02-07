@@ -347,7 +347,7 @@ export function createPathUsageChart(canvasId, data) {
 /**
  * Render activity heatmap on canvas (7x24 grid)
  * @param {string} canvasId - Canvas element ID
- * @param {Array} data - Array of {day_of_week, hour, count} objects
+ * @param {Array} data - 2D grid array [7 rows x 24 cols] with packet counts
  * @returns {Object} Heatmap metadata for later updates
  */
 export function renderActivityHeatmap(canvasId, data) {
@@ -373,21 +373,10 @@ export function renderActivityHeatmap(canvasId, data) {
     // Day labels
     const dayLabels = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-    // Create 2D grid with counts
-    const grid = Array(rows).fill(null).map(() => Array(cols).fill(0));
-
-    // Populate grid from data
-    if (data && data.length > 0) {
-        data.forEach(item => {
-            const day = item.day_of_week;
-            const hour = item.hour;
-            const count = item.count || 0;
-
-            if (day >= 0 && day < rows && hour >= 0 && hour < cols) {
-                grid[day][hour] = count;
-            }
-        });
-    }
+    // Use provided grid directly (already in 7x24 format from API)
+    const grid = data && Array.isArray(data) && data.length === 7
+        ? data
+        : Array(rows).fill(null).map(() => Array(cols).fill(0));
 
     // Find max count for color scaling
     const maxCount = Math.max(1, ...grid.flat());

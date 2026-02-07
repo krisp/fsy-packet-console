@@ -395,7 +395,7 @@ class FrameHistory:
                 'buffer_mode': self.buffer_mode,
                 'max_size_mb': self.max_size_bytes // (1024 * 1024) if self.buffer_mode else 0,
                 'frames': frames_data,
-                'saved_at': datetime.now().isoformat()
+                'saved_at': datetime.now(timezone.utc).isoformat()
             }
 
             # Write compressed JSON
@@ -407,9 +407,10 @@ class FrameHistory:
             os.replace(temp_file, self.BUFFER_FILE)
 
         except Exception as e:
-            # Silently fail - don't disrupt operation if save fails
-            # Could add optional logging here
-            pass
+            # Log error but don't disrupt operation
+            print_error(f"Failed to save frame buffer: {type(e).__name__}: {e}")
+            import traceback
+            print_debug(traceback.format_exc(), level=3)
 
     def load_from_disk(self) -> dict:
         """Load frame buffer from disk if available.
@@ -492,7 +493,10 @@ class FrameHistory:
 
         except Exception as e:
             # If load fails (corrupted file, format change, etc.), start fresh
-            # Don't disrupt startup - just start with empty buffer
+            print_error(f"Failed to load frame buffer: {type(e).__name__}: {e}")
+            print_warning("Starting with empty frame buffer")
+            import traceback
+            print_debug(traceback.format_exc(), level=3)
             self.frames.clear()
             self.frame_counter = 0
             self.current_size_bytes = 0
