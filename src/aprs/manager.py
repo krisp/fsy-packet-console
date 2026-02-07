@@ -15,6 +15,13 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+# Try to use ujson for faster serialization (3-5x speedup)
+try:
+    import ujson
+    HAS_UJSON = True
+except ImportError:
+    HAS_UJSON = False
+
 import src.constants as constants
 from src.device_id import get_device_identifier
 from src.utils import print_debug, print_error, print_info
@@ -378,7 +385,11 @@ class APRSManager:
             try:
                 # Write to temporary file with fast compression (level 1 is 10-20x faster than level 6)
                 with gzip.open(temp_file, "wt", encoding="utf-8", compresslevel=1) as f:
-                    json.dump(data, f, separators=(',', ':'))  # Compact format
+                    # Use ujson for 3-5x faster serialization if available
+                    if HAS_UJSON:
+                        f.write(ujson.dumps(data, ensure_ascii=False))
+                    else:
+                        json.dump(data, f, separators=(',', ':'))  # Compact format
 
                 # Atomic rename (overwrites existing file safely)
                 os.replace(temp_file, self.db_file)
@@ -426,7 +437,11 @@ class APRSManager:
             try:
                 decompress_start = time.time()
                 with gzip.open(self.db_file, "rt", encoding="utf-8") as f:
-                    data = json.load(f)
+                    # Use ujson for faster deserialization if available
+                    if HAS_UJSON:
+                        data = ujson.loads(f.read())
+                    else:
+                        data = json.load(f)
                 decompress_time = time.time() - decompress_start
                 print_info(f"Database decompression: {decompress_time:.2f}s")
             except Exception as e:
@@ -436,7 +451,11 @@ class APRSManager:
         elif os.path.exists(self.db_file_legacy):
             try:
                 with open(self.db_file_legacy, "r") as f:
-                    data = json.load(f)
+                    # Use ujson for faster deserialization if available
+                    if HAS_UJSON:
+                        data = ujson.loads(f.read())
+                    else:
+                        data = json.load(f)
                 print_info(f"Loaded legacy JSON database (will migrate to GZIP on next save)")
             except Exception as e:
                 print_info(f"Warning: Failed to load legacy database: {e}")
