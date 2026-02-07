@@ -241,11 +241,10 @@ class APRSManager:
                         "device": pos.device,
                     }
 
-                # Add position history if present
+                # Add position history if present (use list comprehension)
                 if station.position_history:
-                    station_data["position_history"] = []
-                    for pos in station.position_history:
-                        station_data["position_history"].append({
+                    station_data["position_history"] = [
+                        {
                             "timestamp": pos.timestamp.isoformat(),
                             "station": pos.station,
                             "latitude": pos.latitude,
@@ -256,7 +255,9 @@ class APRSManager:
                             "comment": pos.comment,
                             "grid_square": pos.grid_square,
                             "device": pos.device,
-                        })
+                        }
+                        for pos in station.position_history
+                    ]
 
                 # Add weather data if present
                 if station.last_weather:
@@ -278,11 +279,10 @@ class APRSManager:
                         "raw_data": wx.raw_data,
                     }
 
-                # Add weather history if present
+                # Add weather history if present (use list comprehension)
                 if station.weather_history:
-                    station_data["weather_history"] = []
-                    for wx in station.weather_history:
-                        station_data["weather_history"].append({
+                    station_data["weather_history"] = [
+                        {
                             "timestamp": wx.timestamp.isoformat(),
                             "station": wx.station,
                             "latitude": wx.latitude,
@@ -297,7 +297,9 @@ class APRSManager:
                             "rain_24h": wx.rain_24h,
                             "rain_since_midnight": wx.rain_since_midnight,
                             "raw_data": wx.raw_data,
-                        })
+                        }
+                        for wx in station.weather_history
+                    ]
 
                 # Add status data if present
                 if station.last_status:
@@ -319,33 +321,34 @@ class APRSManager:
                         "digital": telem.digital,
                     }
 
-                # Add telemetry sequence if present
+                # Add telemetry sequence if present (use list comprehension)
                 if station.telemetry_sequence:
-                    station_data["telemetry_sequence"] = []
-                    for telem in station.telemetry_sequence:
-                        station_data["telemetry_sequence"].append(
-                            {
-                                "timestamp": telem.timestamp.isoformat(),
-                                "station": telem.station,
-                                "sequence": telem.sequence,
-                                "analog": telem.analog,
-                                "digital": telem.digital,
-                            }
-                        )
+                    station_data["telemetry_sequence"] = [
+                        {
+                            "timestamp": telem.timestamp.isoformat(),
+                            "station": telem.station,
+                            "sequence": telem.sequence,
+                            "analog": telem.analog,
+                            "digital": telem.digital,
+                        }
+                        for telem in station.telemetry_sequence
+                    ]
 
                 # Add reception events (NEW: single source of truth)
+                # Use list comprehension for faster serialization
                 if station.receptions:
-                    station_data["receptions"] = []
-                    for reception in station.receptions:
-                        station_data["receptions"].append({
-                            "timestamp": reception.timestamp.isoformat(),
-                            "hop_count": reception.hop_count,
-                            "direct_rf": reception.direct_rf,
-                            "relay_call": reception.relay_call,
-                            "digipeater_path": reception.digipeater_path,
-                            "packet_type": reception.packet_type,
-                            "frame_number": reception.frame_number,
-                        })
+                    station_data["receptions"] = [
+                        {
+                            "timestamp": r.timestamp.isoformat(),
+                            "hop_count": r.hop_count,
+                            "direct_rf": r.direct_rf,
+                            "relay_call": r.relay_call,
+                            "digipeater_path": r.digipeater_path,
+                            "packet_type": r.packet_type,
+                            "frame_number": r.frame_number,
+                        }
+                        for r in station.receptions
+                    ]
 
                 data["stations"][callsign] = station_data
 
@@ -368,13 +371,13 @@ class APRSManager:
                 }
                 data["messages"].append(msg_data)
 
-            # Write to GZIP compressed file (96% size reduction vs plain JSON)
+            # Write to GZIP compressed file (fast compression for quick saves)
             # Use atomic write: write to temp file, then rename
             temp_file = self.db_file + ".tmp"
 
             try:
-                # Write to temporary file
-                with gzip.open(temp_file, "wt", encoding="utf-8", compresslevel=6) as f:
+                # Write to temporary file with fast compression (level 1 is 10-20x faster than level 6)
+                with gzip.open(temp_file, "wt", encoding="utf-8", compresslevel=1) as f:
                     json.dump(data, f, separators=(',', ':'))  # Compact format
 
                 # Atomic rename (overwrites existing file safely)
