@@ -3422,7 +3422,7 @@ async def tnc_monitor(tnc_queue, radio):
                                 is_source_digipeater
                             ):
                                 # Create digipeated frame
-                                digi_frame = radio.digipeater.digipeat_frame(complete_frame, parsed_aprs)
+                                digi_frame, path_type = radio.digipeater.digipeat_frame(complete_frame, parsed_aprs)
                                 if digi_frame:
                                     # Transmit the digipeated frame via radio
                                     await radio.write_kiss_frame(digi_frame, response=False)
@@ -3430,6 +3430,22 @@ async def tnc_monitor(tnc_queue, radio):
                                         f"🔁 Digipeated {parsed_aprs['src_call']} "
                                         f"({radio.digipeater.packets_digipeated} total)"
                                     )
+
+                                    # Track digipeater statistics
+                                    if hasattr(radio, 'aprs_manager') and radio.aprs_manager:
+                                        try:
+                                            radio.aprs_manager.record_digipeater_activity(
+                                                station_call=parsed_aprs['src_call'],
+                                                path_type=path_type,
+                                                original_path=parsed_aprs.get('digipeater_path', []),
+                                                frame_number=frame_num
+                                            )
+                                        except AttributeError:
+                                            # record_digipeater_activity method not yet implemented
+                                            pass
+                                        except Exception as e:
+                                            if constants.DEBUG_LEVEL >= 3:
+                                                print_debug(f"Digipeater stats error: {e}", level=3)
                         except Exception as e:
                             if constants.DEBUG_LEVEL >= 2:
                                 print_debug(f"Digipeater error: {e}", level=2)

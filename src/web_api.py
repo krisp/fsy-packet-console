@@ -4,7 +4,7 @@ Provides JSON serialization for APRS data structures and HTTP request handlers
 for the web interface.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 from aiohttp import web
@@ -525,3 +525,364 @@ class APIHandlers:
         TODO: Implement authentication before enabling this endpoint.
         """
         raise web.HTTPNotImplemented(text="Message sending not yet implemented - authentication required")
+
+    async def get_digipeater_stats(self, request: web.Request) -> web.Response:
+        """GET /api/digipeater/stats - Get overall digipeater statistics.
+
+        Query params:
+            range: Time range filter (default: '24h')
+                   Format: '<number>h' for hours, '<number>d' for days
+                   Examples: '1h', '6h', '24h', '7d', '30d', 'all'
+
+        Returns:
+            {
+                "total_packets": int,
+                "unique_stations": int,
+                "top_stations": [{station, count, last_heard}, ...],
+                "path_usage": {path_type: count, ...},
+                "session_start": ISO timestamp,
+                "uptime_seconds": int
+            }
+        """
+        # Check if digipeater_stats exists
+        if not hasattr(self.aprs, 'digipeater_stats') or self.aprs.digipeater_stats is None:
+            return web.json_response({
+                "total_packets": 0,
+                "unique_stations": 0,
+                "top_stations": [],
+                "path_usage": {},
+                "session_start": serialize_datetime(self.start_time),
+                "uptime_seconds": int((datetime.now(timezone.utc) - self.start_time).total_seconds())
+            })
+
+        stats = self.aprs.digipeater_stats
+        range_param = request.query.get('range', '24h')
+
+        # Parse time range
+        cutoff_time = self._parse_time_range(range_param)
+
+        # Filter activities by time range
+        if cutoff_time:
+            activities = [a for a in stats.activities if a.timestamp >= cutoff_time]
+        else:
+            activities = stats.activities
+
+        # Compute statistics from filtered activities
+        total_packets = len(activities)
+        unique_stations = len(set(a.station_call for a in activities))
+
+        # Top stations
+        station_counts = {}
+        station_last_heard = {}
+        for activity in activities:
+            station_counts[activity.station_call] = station_counts.get(activity.station_call, 0) + 1
+            if activity.station_call not in station_last_heard or activity.timestamp > station_last_heard[activity.station_call]:
+                station_last_heard[activity.station_call] = activity.timestamp
+
+        top_stations = [
+            {
+                "station": station,
+                "count": count,
+                "last_heard": serialize_datetime(station_last_heard[station])
+            }
+            for station, count in sorted(station_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+        ]
+
+        # Path usage
+        path_usage = {}
+        for activity in activities:
+            path_usage[activity.path_type] = path_usage.get(activity.path_type, 0) + 1
+
+        uptime = datetime.now(timezone.utc) - stats.session_start
+
+        return web.json_response({
+            "total_packets": total_packets,
+            "unique_stations": unique_stations,
+            "top_stations": top_stations,
+            "path_usage": path_usage,
+            "session_start": serialize_datetime(stats.session_start),
+            "uptime_seconds": int(uptime.total_seconds())
+        })
+
+    async def get_digipeater_activity(self, request: web.Request) -> web.Response:
+        """GET /api/digipeater/activity - Get time-series activity data.
+
+        Query params:
+            hours: Number of hours to look back (default: 24)
+            granularity: Time bucket size: '1h', '15m', '1d' (default: '1h')
+
+        Returns:
+            {
+                "buckets": [
+                    {
+                        "timestamp": ISO timestamp,
+                        "packet_count": int,
+                        "unique_stations": int
+                    },
+                    ...
+                ],
+                "total_packets": int
+            }
+        """
+        # Check if digipeater_stats exists
+        if not hasattr(self.aprs, 'digipeater_stats') or self.aprs.digipeater_stats is None:
+            return web.json_response({
+                "buckets": [],
+                "total_packets": 0
+            })
+
+        stats = self.aprs.digipeater_stats
+        hours = int(request.query.get('hours', '24'))
+        granularity = request.query.get('granularity', '1h')
+
+        # Calculate cutoff time
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+        # Filter activities
+        activities = [a for a in stats.activities if a.timestamp >= cutoff_time]
+
+        # Determine bucket size in seconds
+        if granularity == '15m':
+            bucket_seconds = 900
+        elif granularity == '1d':
+            bucket_seconds = 86400
+        else:  # '1h' default
+            bucket_seconds = 3600
+
+        # Group into buckets
+        buckets = {}
+        for activity in activities:
+            bucket_time = datetime.fromtimestamp(
+                (activity.timestamp.timestamp() // bucket_seconds) * bucket_seconds,
+                tz=timezone.utc
+            )
+            if bucket_time not in buckets:
+                buckets[bucket_time] = {"stations": set(), "count": 0}
+            buckets[bucket_time]["stations"].add(activity.station_call)
+            buckets[bucket_time]["count"] += 1
+
+        # Convert to sorted list
+        bucket_list = [
+            {
+                "timestamp": serialize_datetime(bucket_time),
+                "packet_count": data["count"],
+                "unique_stations": len(data["stations"])
+            }
+            for bucket_time, data in sorted(buckets.items())
+        ]
+
+        return web.json_response({
+            "buckets": bucket_list,
+            "total_packets": len(activities)
+        })
+
+    async def get_digipeater_top_stations(self, request: web.Request) -> web.Response:
+        """GET /api/digipeater/top-stations - Get top stations by packet count.
+
+        Query params:
+            limit: Maximum number of stations to return (default: 10)
+            range: Time range filter (default: '24h')
+
+        Returns:
+            [
+                {
+                    "station": callsign,
+                    "count": int,
+                    "last_heard": ISO timestamp
+                },
+                ...
+            ]
+        """
+        # Check if digipeater_stats exists
+        if not hasattr(self.aprs, 'digipeater_stats') or self.aprs.digipeater_stats is None:
+            return web.json_response([])
+
+        stats = self.aprs.digipeater_stats
+        limit = int(request.query.get('limit', '10'))
+        range_param = request.query.get('range', '24h')
+
+        # Parse time range
+        cutoff_time = self._parse_time_range(range_param)
+
+        # Filter activities
+        if cutoff_time:
+            activities = [a for a in stats.activities if a.timestamp >= cutoff_time]
+        else:
+            activities = stats.activities
+
+        # Aggregate by station
+        station_counts = {}
+        station_last_heard = {}
+        for activity in activities:
+            station_counts[activity.station_call] = station_counts.get(activity.station_call, 0) + 1
+            if activity.station_call not in station_last_heard or activity.timestamp > station_last_heard[activity.station_call]:
+                station_last_heard[activity.station_call] = activity.timestamp
+
+        # Sort and limit
+        top_stations = [
+            {
+                "station": station,
+                "count": count,
+                "last_heard": serialize_datetime(station_last_heard[station])
+            }
+            for station, count in sorted(station_counts.items(), key=lambda x: x[1], reverse=True)[:limit]
+        ]
+
+        return web.json_response(top_stations)
+
+    async def get_digipeater_path_usage(self, request: web.Request) -> web.Response:
+        """GET /api/digipeater/path-usage - Get path type usage statistics.
+
+        Query params:
+            range: Time range filter (default: '24h')
+
+        Returns:
+            {
+                "WIDE1-1": int,
+                "WIDE2-2": int,
+                "WIDE2-1": int,
+                "Direct": int,
+                "Other": int
+            }
+        """
+        # Check if digipeater_stats exists
+        if not hasattr(self.aprs, 'digipeater_stats') or self.aprs.digipeater_stats is None:
+            return web.json_response({})
+
+        stats = self.aprs.digipeater_stats
+        range_param = request.query.get('range', '24h')
+
+        # Parse time range
+        cutoff_time = self._parse_time_range(range_param)
+
+        # Filter activities
+        if cutoff_time:
+            activities = [a for a in stats.activities if a.timestamp >= cutoff_time]
+        else:
+            activities = stats.activities
+
+        # Count by path type
+        path_usage = {}
+        for activity in activities:
+            path_usage[activity.path_type] = path_usage.get(activity.path_type, 0) + 1
+
+        return web.json_response(path_usage)
+
+    async def get_digipeater_heatmap(self, request: web.Request) -> web.Response:
+        """GET /api/digipeater/heatmap - Get time-of-day activity heatmap.
+
+        Query params:
+            days: Number of days to look back (default: 7)
+
+        Returns:
+            {
+                "heatmap": [
+                    [hour0_day0, hour1_day0, ..., hour23_day0],  # Sunday
+                    [hour0_day1, hour1_day1, ..., hour23_day1],  # Monday
+                    ...
+                    [hour0_day6, hour1_day6, ..., hour23_day6]   # Saturday
+                ],
+                "max_value": int,
+                "total_packets": int
+            }
+        """
+        # Check if digipeater_stats exists
+        if not hasattr(self.aprs, 'digipeater_stats') or self.aprs.digipeater_stats is None:
+            return web.json_response({
+                "heatmap": [[0] * 24 for _ in range(7)],
+                "max_value": 0,
+                "total_packets": 0
+            })
+
+        stats = self.aprs.digipeater_stats
+        days = int(request.query.get('days', '7'))
+
+        # Calculate cutoff time
+        cutoff_time = datetime.now(timezone.utc) - timedelta(days=days)
+
+        # Filter activities
+        activities = [a for a in stats.activities if a.timestamp >= cutoff_time]
+
+        # Create 7x24 grid (day of week x hour of day)
+        heatmap = [[0] * 24 for _ in range(7)]
+
+        for activity in activities:
+            day_of_week = activity.timestamp.weekday()  # 0=Monday, 6=Sunday
+            hour = activity.timestamp.hour
+            heatmap[day_of_week][hour] += 1
+
+        # Find max value for scaling
+        max_value = max(max(row) for row in heatmap) if any(any(row) for row in heatmap) else 0
+
+        return web.json_response({
+            "heatmap": heatmap,
+            "max_value": max_value,
+            "total_packets": len(activities)
+        })
+
+    async def get_network_digipeater_stats(
+        self, request: web.Request
+    ) -> web.Response:
+        """GET /api/digipeater/network - Get network-wide digipeater stats.
+
+        Computes digipeater activity for ALL digipeaters in the network by
+        scanning ReceptionEvents. This is computed on-demand.
+
+        Query params:
+            hours: Only include last N hours (default: all time)
+            limit: Maximum number of digipeaters to return (default: 20)
+
+        Returns:
+            [
+                {
+                    "callsign": "DIGI-CALL",
+                    "packets_relayed": 150,
+                    "unique_stations": 25,
+                    "last_heard": "ISO timestamp",
+                    "position": {...} or None
+                },
+                ...
+            ]
+        """
+        hours_param = request.query.get('hours')
+        hours = int(hours_param) if hours_param else None
+        limit = int(request.query.get('limit', '20'))
+
+        # Get network-wide stats from APRSManager
+        network_stats = self.aprs.get_network_digipeater_stats(hours=hours)
+
+        # Limit results
+        limited_stats = network_stats[:limit]
+
+        return web.json_response({
+            "digipeaters": limited_stats,
+            "total_count": len(network_stats),
+            "returned_count": len(limited_stats)
+        })
+
+    def _parse_time_range(self, range_param: str) -> Optional[datetime]:
+        """Parse time range parameter into cutoff datetime.
+
+        Args:
+            range_param: Time range string ('1h', '6h', '24h', '7d', '30d', 'all')
+
+        Returns:
+            Cutoff datetime or None for 'all'
+        """
+        if range_param == 'all':
+            return None
+
+        try:
+            # Extract number and unit
+            if range_param.endswith('h'):
+                hours = int(range_param[:-1])
+                return datetime.now(timezone.utc) - timedelta(hours=hours)
+            elif range_param.endswith('d'):
+                days = int(range_param[:-1])
+                return datetime.now(timezone.utc) - timedelta(days=days)
+            else:
+                # Default to 24h if invalid format
+                return datetime.now(timezone.utc) - timedelta(hours=24)
+        except (ValueError, IndexError):
+            # Default to 24h if parsing fails
+            return datetime.now(timezone.utc) - timedelta(hours=24)

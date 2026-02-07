@@ -1373,3 +1373,383 @@ header h1 {
 .leaflet-marker-icon.marker-glow {
     animation: marker-glow 1.2s ease-out;
 }
+
+/* ============================================
+   DIGIPEATER DASHBOARD STYLES
+   ============================================ */
+
+/* Dashboard Container */
+.digipeater-dashboard-container {
+    display: grid;
+    grid-template-columns: 1fr 2fr 1fr;
+    gap: 1.5rem;
+    padding: 1.5rem;
+    height: calc(100vh - 80px);
+    overflow: hidden;
+}
+
+.dashboard-left {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    overflow-y: auto;
+    width: 100%;
+}
+
+.dashboard-center {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    overflow-y: auto;
+    width: 100%;
+}
+
+.dashboard-right {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+    overflow-y: auto;
+    width: 100%;
+}
+
+/* Stat Card Styling */
+.stat-card {
+    background: #2d2d2d;
+    border: 1px solid #444;
+    border-radius: 8px;
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+}
+
+.stat-card:hover {
+    border-color: #00ff00;
+    box-shadow: 0 0 8px rgba(0, 255, 0, 0.2);
+}
+
+.stat-card-icon {
+    font-size: 1.5rem;
+    margin-bottom: 0.5rem;
+    opacity: 0.8;
+    transition: opacity 0.2s;
+}
+
+.stat-card:hover .stat-card-icon {
+    opacity: 1;
+}
+
+.stat-card-value {
+    font-size: 2rem;
+    font-weight: 700;
+    color: #00ff00;
+    font-family: 'Courier New', monospace;
+    line-height: 1;
+}
+
+.stat-card-label {
+    font-size: 0.85rem;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 500;
+}
+
+/* Digipeater Activity Item Styling */
+.digipeater-activity-item {
+    padding: 0.75rem;
+    background: #252525;
+    border-left: 3px solid #3388ff;
+    border-radius: 0 4px 4px 0;
+    transition: all 0.2s ease;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+}
+
+.digipeater-activity-item:hover {
+    background: #2d2d2d;
+    border-left-color: #00ff00;
+}
+
+.digipeater-activity-item.warning {
+    border-left-color: #ffa500;
+}
+
+.digipeater-activity-item.error {
+    border-left-color: #ff4444;
+}
+
+.activity-details {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
+}
+
+.activity-primary {
+    color: #00ff00;
+    font-weight: 600;
+    font-size: 0.9rem;
+    word-break: break-word;
+}
+
+.activity-secondary {
+    color: #aaa;
+    font-size: 0.8rem;
+}
+
+.activity-timestamp {
+    color: #666;
+    font-size: 0.75rem;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+/* Pulsing Animation for Digipeater Marker */
+@keyframes marker-pulse {
+    0% {
+        box-shadow: 0 0 0 0 rgba(51, 136, 255, 0.7),
+                    0 0 0 0 rgba(51, 136, 255, 0.5);
+    }
+    50% {
+        box-shadow: 0 0 0 12px rgba(51, 136, 255, 0),
+                    0 0 0 20px rgba(51, 136, 255, 0);
+    }
+    100% {
+        box-shadow: 0 0 0 12px rgba(51, 136, 255, 0),
+                    0 0 0 20px rgba(51, 136, 255, 0);
+    }
+}
+
+.marker-pulse {
+    animation: marker-pulse 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+/* Stat Update Counter Animation */
+@keyframes stat-updated {
+    0% {
+        background: rgba(0, 255, 0, 0.2);
+        transform: scale(1);
+    }
+    50% {
+        background: rgba(0, 255, 0, 0.1);
+        transform: scale(1.02);
+    }
+    100% {
+        background: rgba(0, 255, 0, 0);
+        transform: scale(1);
+    }
+}
+
+.stat-updated {
+    animation: stat-updated 0.6s ease-out;
+}
+
+/* Chart Loading and Error States */
+.chart-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: #888;
+    font-style: italic;
+    gap: 0.5rem;
+}
+
+.chart-loading::before {
+    content: '';
+    width: 12px;
+    height: 12px;
+    border: 2px solid #444;
+    border-top-color: #00ff00;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+.chart-error {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: #ff6666;
+    font-style: italic;
+}
+
+/* Time Range Filters */
+.time-range-filters {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
+.time-range-btn {
+    background: #2d2d2d;
+    border: 1px solid #444;
+    color: #aaa;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.85rem;
+    font-weight: 500;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+.time-range-btn:hover {
+    border-color: #00ff00;
+    color: #e0e0e0;
+}
+
+.time-range-btn.active {
+    background: #00ff00;
+    color: #1a1a1a;
+    border-color: #00ff00;
+}
+
+/* Dashboard Chart Container */
+.dashboard-chart {
+    background: #2d2d2d;
+    border: 1px solid #444;
+    border-radius: 8px;
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    flex: 1;
+    overflow: hidden;
+}
+
+.dashboard-chart h3 {
+    color: #00ff00;
+    font-size: 1.1rem;
+    margin: 0;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid #444;
+}
+
+.dashboard-chart-content {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 200px;
+    overflow: hidden;
+}
+
+/* Dashboard Heading */
+.dashboard-heading {
+    color: #00ff00;
+    font-size: 1rem;
+    margin: 0;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid #444;
+    font-weight: 600;
+}
+
+/* Activity Feed Container */
+.activity-feed {
+    background: #2d2d2d;
+    border: 1px solid #444;
+    border-radius: 8px;
+    padding: 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    flex: 1;
+    overflow: hidden;
+}
+
+.activity-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    overflow-y: auto;
+    flex: 1;
+}
+
+/* Stats Grid */
+.stats-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1rem;
+}
+
+.stats-grid.two-col {
+    grid-template-columns: 1fr 1fr;
+}
+
+/* Responsive Design for Dashboard */
+@media (max-width: 1440px) {
+    .digipeater-dashboard-container {
+        grid-template-columns: 1fr 1.5fr 1fr;
+        gap: 1rem;
+    }
+}
+
+@media (max-width: 1200px) {
+    .digipeater-dashboard-container {
+        grid-template-columns: 1fr 1fr;
+        height: auto;
+        overflow-y: auto;
+    }
+
+    .dashboard-right {
+        grid-column: 1 / -1;
+    }
+}
+
+@media (max-width: 768px) {
+    .digipeater-dashboard-container {
+        grid-template-columns: 1fr;
+        gap: 1rem;
+        padding: 1rem;
+        height: auto;
+        overflow-y: auto;
+    }
+
+    .dashboard-left,
+    .dashboard-center,
+    .dashboard-right {
+        width: 100%;
+    }
+
+    .stat-card-value {
+        font-size: 1.5rem;
+    }
+
+    .stat-card {
+        padding: 1rem;
+    }
+
+    .stats-grid.two-col {
+        grid-template-columns: 1fr;
+    }
+
+    .time-range-filters {
+        justify-content: flex-start;
+        overflow-x: auto;
+    }
+
+    .time-range-btn {
+        padding: 0.4rem 0.8rem;
+        font-size: 0.8rem;
+    }
+
+    .dashboard-chart {
+        padding: 1rem;
+        min-height: 250px;
+    }
+
+    .activity-feed {
+        padding: 1rem;
+    }
+}

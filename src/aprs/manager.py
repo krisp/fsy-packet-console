@@ -13,7 +13,7 @@ import re
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import src.constants as constants
 from src.device_id import get_device_identifier
@@ -27,6 +27,7 @@ from .models import (
 from .duplicate_detector import DuplicateDetector
 from .geo_utils import latlon_to_maidenhead, maidenhead_to_latlon, calculate_dew_point
 from .weather_forecast import calculate_zambretti_code, adjust_pressure_to_sea_level, ZAMBRETTI_FORECASTS
+from .digipeater_stats import DigipeaterStats, DigipeaterActivity
 
 # Note: Models are imported from src/aprs/models.py to ensure consistency
 # across the codebase. The dataclass definitions below were removed to avoid
@@ -114,6 +115,11 @@ class APRSManager:
         # Legacy: Keep _duplicate_cache for backwards compatibility with is_duplicate_packet()
         self._duplicate_cache: Dict[str, float] = {}
 
+        # Digipeater statistics
+        self.digipeater_stats = DigipeaterStats(
+            session_start=datetime.now(timezone.utc)
+        )
+
         # Command processor reference (for GPS access via web API)
         self._cmd_processor = None
 
@@ -197,6 +203,7 @@ class APRSManager:
                 "stations": {},
                 "messages": [],
                 "migrations": getattr(self, 'migrations', {}),  # Migration state
+                "digipeater_stats": self.digipeater_stats.to_dict(),
                 "saved_at": datetime.now(timezone.utc).isoformat(),
             }
 
@@ -666,6 +673,27 @@ class APRSManager:
 
             # Restore migration state
             self.migrations = data.get("migrations", {})
+
+            # Restore digipeater stats
+            if "digipeater_stats" in data:
+                self.digipeater_stats = DigipeaterStats.from_dict(
+                    data["digipeater_stats"]
+                )
+                # Ensure timestamps are UTC-aware
+                self.digipeater_stats.session_start = ensure_utc_aware(
+                    self.digipeater_stats.session_start
+                )
+                # Ensure activity timestamps are UTC-aware
+                for activity in self.digipeater_stats.activities:
+                    activity.timestamp = ensure_utc_aware(activity.timestamp)
+            else:
+                # Initialize if missing (backwards compatibility)
+                self.digipeater_stats = DigipeaterStats(
+                    session_start=datetime.now(timezone.utc)
+                )
+
+            # Recompute aggregates after loading
+            self._recompute_digipeater_aggregates()
 
             # Success message
             parse_time = time.time() - parse_start
@@ -3359,6 +3387,108 @@ class APRSManager:
         return [station for station in self.stations.values()
                 if station.heard_zero_hop and station.zero_hop_packet_count > 0]
 
+    def get_network_digipeater_stats(
+        self, hours: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Get network-wide digipeater statistics from ReceptionEvents.
+
+        Scans all stations' reception events to count how many packets each
+        digipeater has relayed. This is computed on-demand from existing data.
+
+        Args:
+            hours: Only include receptions from last N hours (None = all time)
+
+        Returns:
+            List of digipeater statistics, sorted by packet count descending:
+            [
+                {
+                    "callsign": "DIGI-CALL",
+                    "packets_relayed": 150,
+                    "unique_stations": 25,
+                    "last_heard": "ISO timestamp",
+                    "position": {...} or None
+                },
+                ...
+            ]
+        """
+        from datetime import timedelta
+
+        # Calculate cutoff time
+        cutoff_time = None
+        if hours is not None:
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+        # Track digipeater activity
+        digi_stats = {}  # callsign -> {packets, stations_set, last_heard}
+
+        # Scan all stations' receptions
+        for station in self.stations.values():
+            for reception in station.receptions:
+                # Skip if outside time window
+                if cutoff_time and reception.timestamp < cutoff_time:
+                    continue
+
+                # Skip if not RF
+                if not reception.direct_rf:
+                    continue
+
+                # Skip if no digipeater path
+                if not reception.digipeater_path:
+                    continue
+
+                # Count each digipeater in the path
+                for hop in reception.digipeater_path:
+                    # Clean callsign (remove asterisk H-bit marker)
+                    digi_call = hop.rstrip('*').upper()
+
+                    # Skip empty or WIDEn-N aliases (not actual callsigns)
+                    if not digi_call or digi_call.startswith('WIDE'):
+                        continue
+
+                    # Initialize if first time seeing this digipeater
+                    if digi_call not in digi_stats:
+                        digi_stats[digi_call] = {
+                            'packets': 0,
+                            'stations': set(),
+                            'last_heard': reception.timestamp
+                        }
+
+                    # Update stats
+                    digi_stats[digi_call]['packets'] += 1
+                    digi_stats[digi_call]['stations'].add(station.callsign)
+
+                    # Update last_heard if newer
+                    if reception.timestamp > digi_stats[digi_call]['last_heard']:
+                        digi_stats[digi_call]['last_heard'] = reception.timestamp
+
+        # Convert to list format with positions
+        result = []
+        for callsign, stats in digi_stats.items():
+            entry = {
+                'callsign': callsign,
+                'packets_relayed': stats['packets'],
+                'unique_stations': len(stats['stations']),
+                'last_heard': stats['last_heard'].isoformat(),
+                'position': None
+            }
+
+            # Add position if digipeater is in our station list
+            digi_station = self.stations.get(callsign)
+            if digi_station and digi_station.last_position:
+                pos = digi_station.last_position
+                entry['position'] = {
+                    'latitude': pos.latitude,
+                    'longitude': pos.longitude,
+                    'grid_square': pos.grid_square
+                }
+
+            result.append(entry)
+
+        # Sort by packets_relayed descending
+        result.sort(key=lambda x: x['packets_relayed'], reverse=True)
+
+        return result
+
     def get_digipeater_coverage(self) -> Dict[str, Dict]:
         """Get digipeater coverage data for mapping.
 
@@ -3915,3 +4045,109 @@ class APRSManager:
         messages_pruned = messages_before - len(self.monitored_messages)
 
         return (len(stations_to_remove), messages_pruned)
+
+    def record_digipeater_activity(
+        self, station_call: str, path_type: str, original_path: List[str],
+        frame_number: Optional[int] = None
+    ) -> None:
+        """Record a digipeater activity event.
+
+        Args:
+            station_call: Callsign of station that was digipeated
+            path_type: Path classification (e.g., "WIDE1-1", "WIDE2-1", "Direct", "Other")
+            original_path: Original path from packet (list of callsigns)
+            frame_number: Optional reference to frame buffer
+        """
+        now = datetime.now(timezone.utc)
+
+        # Create activity event
+        activity = DigipeaterActivity(
+            timestamp=now,
+            station_call=station_call,
+            path_type=path_type,
+            original_path=original_path,
+            frame_number=frame_number,
+        )
+
+        # Append to activities list
+        self.digipeater_stats.activities.append(activity)
+
+        # Increment counter
+        self.digipeater_stats.packets_digipeated += 1
+
+        # Keep only last 500 activities
+        if len(self.digipeater_stats.activities) > 500:
+            self.digipeater_stats.activities = self.digipeater_stats.activities[-500:]
+
+        # Recompute aggregates
+        self._recompute_digipeater_aggregates()
+
+    def _recompute_digipeater_aggregates(self) -> None:
+        """Recompute digipeater aggregate statistics with 3-tier time retention.
+
+        Three-tier retention policy:
+        - Last hour: ALL samples (full detail for current activity)
+        - 1 hour to 1 day: one sample every 15 minutes (recent trends)
+        - Older than 1 day: one sample per hour (long-term history)
+
+        Aggregates:
+        - top_stations: Count by station_call
+        - path_usage: Count by path_type
+        """
+        # Skip during migration
+        if self._migration_mode:
+            return
+
+        now = datetime.now(timezone.utc)
+        activities = self.digipeater_stats.activities
+
+        # Sort by timestamp (newest first)
+        activities.sort(key=lambda a: a.timestamp, reverse=True)
+
+        # Only run retention policy when activities exceeds threshold
+        if len(activities) > 250:
+            # Build retention list with three-tier policy
+            retained = []
+            last_15min = None
+            last_hour = None
+
+            for act in activities:
+                age = now - act.timestamp
+
+                # Tier 1: Keep ALL activities from the last hour (full detail)
+                if age <= timedelta(hours=1):
+                    retained.append(act)
+                # Tier 2: 1 hour to 1 day - keep one sample every 15 minutes
+                elif age <= timedelta(days=1):
+                    # Keep if no 15-min sample yet, or if 15+ min since last kept
+                    if last_15min is None or (
+                        last_15min - act.timestamp
+                    ) >= timedelta(minutes=15):
+                        retained.append(act)
+                        last_15min = act.timestamp
+                # Tier 3: Older than 1 day - keep one sample per hour
+                else:
+                    # Keep if no hourly sample yet, or if 1+ hour since last kept
+                    if last_hour is None or (
+                        last_hour - act.timestamp
+                    ) >= timedelta(hours=1):
+                        retained.append(act)
+                        last_hour = act.timestamp
+
+            # Update activities with retained samples
+            self.digipeater_stats.activities = retained
+            activities = retained
+
+        # Recompute aggregates from all retained activities
+        top_stations = {}
+        path_usage = {}
+
+        for act in activities:
+            # Count by station
+            top_stations[act.station_call] = top_stations.get(act.station_call, 0) + 1
+            # Count by path type
+            path_usage[act.path_type] = path_usage.get(act.path_type, 0) + 1
+
+        # Update stats
+        self.digipeater_stats.top_stations = top_stations
+        self.digipeater_stats.path_usage = path_usage

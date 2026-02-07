@@ -204,7 +204,31 @@ class Digipeater:
 
         return new_path, used_alias
 
-    def digipeat_frame(self, complete_frame: bytes, aprs_data: dict) -> bytes:
+    def _extract_path_type(self, used_alias: str) -> str:
+        """Extract path type from the used alias.
+
+        Args:
+            used_alias: The alias we filled (e.g., "WIDE1-1", "WIDE2-2", "K1FSY-9")
+
+        Returns:
+            Path type: "WIDE1-1", "WIDE2-2", "WIDE2-1", "Direct", or "Other"
+        """
+        if not used_alias:
+            return "Other"
+
+        alias_upper = used_alias.upper().rstrip('*')
+
+        # Check for WIDEn-N patterns
+        if alias_upper.startswith('WIDE') and '-' in alias_upper:
+            # Return the exact WIDE pattern (e.g., "WIDE1-1", "WIDE2-2", "WIDE2-1")
+            return alias_upper
+        elif self._matches_my_calls(alias_upper):
+            # Direct addressing to our callsign or alias
+            return "Direct"
+        else:
+            return "Other"
+
+    def digipeat_frame(self, complete_frame: bytes, aprs_data: dict) -> tuple:
         """Create digipeated frame with updated path.
 
         Args:
@@ -212,7 +236,9 @@ class Digipeater:
             aprs_data: Parsed APRS data from parse_and_track_aprs_frame()
 
         Returns:
-            New KISS frame with updated path, or None if processing failed
+            Tuple of (new_frame, path_type) where:
+                new_frame: New KISS frame with updated path, or None if processing failed
+                path_type: Path type used ("WIDE1-1", "WIDE2-2", "Direct", etc.)
         """
         try:
             # Extract components
@@ -226,7 +252,10 @@ class Digipeater:
 
             if used_alias is None:
                 # Couldn't fill any hop - shouldn't happen if should_digipeat() returned True
-                return None
+                return None, None
+
+            # Extract path type for statistics
+            path_type = self._extract_path_type(used_alias)
 
             # Build new frame with updated path
             new_frame = encode_aprs_packet(src_call.rstrip('*'), dst_call.rstrip('*'), new_path, info_str)
@@ -254,8 +283,8 @@ class Digipeater:
                     stations=filter_stations
                 )
 
-            return new_frame
+            return new_frame, path_type
 
         except Exception as e:
             print_debug(f"Digipeater: Error creating digipeated frame: {e}", level=1)
-            return None
+            return None, None

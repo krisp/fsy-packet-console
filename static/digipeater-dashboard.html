@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Digipeater Dashboard - FSY Packet Console</title>
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+    <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <h1>FSY Packet Console</h1>
+        </div>
+        <div class="header-right">
+            <nav class="header-nav">
+                <a href="/" class="nav-link">Map</a>
+                <a href="/stations" class="nav-link">Stations</a>
+                <a href="/weather-map" class="nav-link">Weather</a>
+                <a href="/digipeater-dashboard" class="nav-link active">Digipeater</a>
+            </nav>
+            <div id="status">
+                <span id="mycall" class="status-item">Loading...</span>
+                <span class="status-separator">•</span>
+                <span id="station-count" class="status-item">0 Stations</span>
+                <span class="status-separator">•</span>
+                <span id="connectionStatus" class="status-item status-connected">Connected</span>
+            </div>
+        </div>
+    </header>
+
+    <div class="detail-container">
+        <!-- Dashboard Controls -->
+        <div id="dashboard-controls" class="dashboard-controls">
+            <h2>Digipeater Statistics Dashboard</h2>
+
+            <!-- Time Range Filter -->
+            <div class="controls-section">
+                <label class="controls-label">Time Range:</label>
+                <div class="time-range-buttons">
+                    <button id="time-1h" class="time-btn">1H</button>
+                    <button id="time-6h" class="time-btn">6H</button>
+                    <button id="time-24h" class="time-btn active">24H</button>
+                    <button id="time-7d" class="time-btn">7D</button>
+                    <button id="time-30d" class="time-btn">30D</button>
+                    <button id="time-all" class="time-btn">All</button>
+                </div>
+            </div>
+
+            <!-- Export Controls -->
+            <div class="controls-section">
+                <label class="controls-label">Export:</label>
+                <div class="export-buttons">
+                    <button id="exportCSV" class="export-btn">CSV</button>
+                    <button id="exportJSON" class="export-btn">JSON</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Error Message -->
+        <div id="errorMessage" class="error-message" style="display: none;"></div>
+
+        <!-- Dashboard Grid -->
+        <div class="dashboard-grid">
+            <!-- Section A: Stats Overview Cards -->
+            <div class="dashboard-section stats-cards-section">
+                <div id="total-packets-card" class="stat-card">
+                    <div class="stat-label">Total Packets</div>
+                    <div id="total-packets-value" class="stat-value">0</div>
+                    <div class="stat-unit">packets</div>
+                </div>
+                <div id="peak-rate-card" class="stat-card">
+                    <div class="stat-label">Peak Rate</div>
+                    <div id="peak-rate-value" class="stat-value">0</div>
+                    <div class="stat-unit">pkt/min</div>
+                </div>
+                <div id="active-stations-card" class="stat-card">
+                    <div class="stat-label">Active Stations</div>
+                    <div id="active-stations-value" class="stat-value">0</div>
+                    <div class="stat-unit">stations</div>
+                </div>
+                <div id="uptime-card" class="stat-card">
+                    <div class="stat-label">Uptime</div>
+                    <div id="uptime" class="stat-value">0</div>
+                    <div class="stat-unit">hours</div>
+                </div>
+            </div>
+
+            <!-- Section B: Hourly Activity Chart -->
+            <div class="dashboard-section">
+                <h3>Hourly Activity</h3>
+                <div id="hourly-activity-container" class="chart-container">
+                    <canvas id="hourlyActivityChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Section C: Top 10 Stations Chart -->
+            <div class="dashboard-section">
+                <h3>Top 10 Digipeaters</h3>
+                <div id="top-stations-container" class="chart-container">
+                    <canvas id="topStationsChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Section D: Path Usage Chart -->
+            <div class="dashboard-section">
+                <h3>Path Usage Distribution</h3>
+                <div id="path-usage-container" class="chart-container">
+                    <canvas id="pathUsageChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Section E: Time-of-Day Heatmap -->
+            <div class="dashboard-section">
+                <h3>Activity Heatmap (Hour of Day)</h3>
+                <div id="heatmap-container" class="chart-container">
+                    <canvas id="activityHeatmap"></canvas>
+                </div>
+            </div>
+
+            <!-- Section F: Recent Activity Feed -->
+            <div class="dashboard-section">
+                <h3>Recent Activity Feed</h3>
+                <div id="activityFeed" class="activity-feed">
+                    <div class="loading-placeholder">Loading activity...</div>
+                </div>
+            </div>
+
+            <!-- Section G: Coverage Map -->
+            <div class="dashboard-section">
+                <h3>Coverage Map</h3>
+                <div id="coverage-map-container" class="map-container">
+                    <div id="coverage-map"></div>
+                </div>
+            </div>
+
+            <!-- Section H: Top Digipeaters Table -->
+            <div class="dashboard-section">
+                <h3>Top Digipeaters Details</h3>
+                <div class="table-wrapper">
+                    <table id="top-digipeaters-table" class="data-table">
+                        <thead>
+                            <tr>
+                                <th data-sort="rank" class="sortable sorted-asc">
+                                    Rank
+                                    <span class="sort-indicator">▲</span>
+                                </th>
+                                <th data-sort="callsign" class="sortable">
+                                    Callsign
+                                    <span class="sort-indicator"></span>
+                                </th>
+                                <th data-sort="packets" class="sortable">
+                                    Packets
+                                    <span class="sort-indicator"></span>
+                                </th>
+                                <th data-sort="percentage" class="sortable">
+                                    Percentage
+                                    <span class="sort-indicator"></span>
+                                </th>
+                                <th data-sort="last-heard" class="sortable">
+                                    Last Heard
+                                    <span class="sort-indicator"></span>
+                                </th>
+                                <th data-sort="frequency" class="sortable">
+                                    Frequency
+                                    <span class="sort-indicator"></span>
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody id="digipeaters-tbody">
+                            <tr class="loading-row">
+                                <td colspan="6" class="loading-cell">Loading digipeaters...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/vendor/leaflet/leaflet.js"></script>
+    <script src="/static/vendor/chart.js/chart.min.js"></script>
+    <script type="module" src="/static/js/api.js"></script>
+    <script type="module" src="/static/js/digipeater-charts.js"></script>
+    <script type="module" src="/static/js/digipeater-dashboard.js"></script>
+</body>
+</html>

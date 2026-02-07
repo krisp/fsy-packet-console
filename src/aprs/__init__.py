@@ -23,6 +23,7 @@ from .weather_forecast import (
 )
 from .formatters import APRSFormatters
 from .duplicate_detector import DuplicateDetector
+from .digipeater_stats import DigipeaterActivity, DigipeaterStats
 
 # Import manager when available (will be added after refactoring)
 try:
@@ -34,6 +35,9 @@ __all__ = [
     # Data models
     'APRSMessage', 'APRSPosition', 'APRSWeather', 'APRSStatus',
     'APRSTelemetry', 'APRSStation',
+
+    # Digipeater stats
+    'DigipeaterActivity', 'DigipeaterStats',
 
     # Geographic utilities
     'latlon_to_maidenhead', 'maidenhead_to_latlon', 'calculate_dew_point',

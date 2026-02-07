@@ -79,6 +79,7 @@ class WebServer:
             self.app.router.add_get('/stations', self._handle_stations_list)
             self.app.router.add_get('/station/{callsign}', self._handle_station_detail)
             self.app.router.add_get('/weather-map', self._handle_weather_map)
+            self.app.router.add_get('/digipeater-dashboard', self._handle_digipeater_dashboard)
             self.app.router.add_static('/static', self.static_dir, show_index=False)
 
             # API routes
@@ -93,6 +94,14 @@ class WebServer:
             self.app.router.add_get('/api/status', api_handlers.handle_get_status)
             self.app.router.add_get('/api/gps', api_handlers.handle_get_gps)
             self.app.router.add_get('/api/events', self._handle_sse)
+
+            # Digipeater statistics API routes
+            self.app.router.add_get('/api/digipeater/stats', api_handlers.get_digipeater_stats)
+            self.app.router.add_get('/api/digipeater/activity', api_handlers.get_digipeater_activity)
+            self.app.router.add_get('/api/digipeater/top-stations', api_handlers.get_digipeater_top_stations)
+            self.app.router.add_get('/api/digipeater/path-usage', api_handlers.get_digipeater_path_usage)
+            self.app.router.add_get('/api/digipeater/heatmap', api_handlers.get_digipeater_heatmap)
+            self.app.router.add_get('/api/digipeater/network', api_handlers.get_network_digipeater_stats)
 
             # TODO: POST routes for message sending (requires authentication)
             self.app.router.add_post('/api/messages', api_handlers.handle_send_message)
@@ -173,6 +182,17 @@ class WebServer:
             return web.Response(text="Weather map page not found.", status=500)
 
         with open(weather_map_file, 'r') as f:
+            html = f.read()
+
+        return web.Response(text=html, content_type='text/html')
+
+    async def _handle_digipeater_dashboard(self, request: web.Request) -> web.Response:
+        """Serve the digipeater statistics dashboard page."""
+        dashboard_file = self.static_dir / 'digipeater-dashboard.html'
+        if not dashboard_file.exists():
+            return web.Response(text="Digipeater dashboard page not found. Please check static files.", status=500)
+
+        with open(dashboard_file, 'r') as f:
             html = f.read()
 
         return web.Response(text=html, content_type='text/html')
