@@ -547,8 +547,7 @@ class TCPTransport(TransportBase):
             return True
 
         except ConnectionRefusedError:
-            print_error(f"Connection refused: {self.host}:{self.port}")
-            print_error("Is Direwolf or KISS TNC server running?")
+            print_error(f"Connection refused: {self.host}:{self.port} (is Direwolf running?)")
             return False
         except OSError as e:
             print_error(f"Cannot connect to {self.host}:{self.port}: {e}")

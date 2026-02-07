@@ -4057,8 +4057,7 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
             )
 
             if not await transport.connect():
-                print_error("Failed to connect to KISS TNC server")
-                print_error("Verify Direwolf or remote TNC is running")
+                # Error already printed by transport layer
                 return
 
             print_info(f"TCP KISS client ready")
@@ -4310,7 +4309,7 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
 
 def run(auto_tnc=False, auto_connect=None, auto_debug=False,
         serial_port=None, serial_baud=9600, tcp_host=None, tcp_port=8001,
-        radio_mac=None):
+        radio_mac=None, init_kiss=False):
     """Entry point for the console application."""
     def sigterm_handler(signum, frame):
         """Handle SIGTERM by raising SIGINT to interrupt the prompt."""
@@ -4331,6 +4330,7 @@ def run(auto_tnc=False, auto_connect=None, auto_debug=False,
                 tcp_host=tcp_host,
                 tcp_port=tcp_port,
                 radio_mac=radio_mac,
+                init_kiss=init_kiss,
             )
         )
     except KeyboardInterrupt:
