@@ -140,6 +140,10 @@ class APRSManager:
         # Migration state (populated by load_database or migration system)
         self.migrations = {}
 
+        # Async save lock to prevent concurrent saves
+        self._save_lock = asyncio.Lock()
+        self._last_save_time = 0  # Track last save for monitoring
+
         # Load persistent database
         self.load_database()
 
@@ -177,12 +181,41 @@ class APRSManager:
                 # Silently ignore broadcast errors to not disrupt normal operation
                 pass
 
+    async def save_database_async(self):
+        """Save APRS station database to disk asynchronously (non-blocking).
+
+        Uses asyncio.to_thread to run the blocking save operation in a thread pool,
+        preventing event loop blocking. Includes lock to prevent concurrent saves.
+
+        Returns:
+            Number of stations saved, or 0 on error
+        """
+        # Prevent concurrent saves
+        if self._save_lock.locked():
+            print_debug("Database save already in progress, skipping", level=3)
+            return 0
+
+        async with self._save_lock:
+            save_start = time.time()
+            try:
+                # Run blocking save in thread pool
+                count = await asyncio.to_thread(self.save_database)
+                save_duration = time.time() - save_start
+                self._last_save_time = time.time()
+                print_debug(f"Database saved asynchronously in {save_duration:.2f}s ({count} stations)", level=3)
+                return count
+            except Exception as e:
+                print_error(f"Async database save failed: {e}")
+                return 0
+
     def save_database(self):
-        """Save APRS station database to disk.
+        """Save APRS station database to disk (blocking).
 
         Saves the stations dictionary and monitored messages to GZIP-compressed
         JSON format with datetime serialization. Uses atomic write to prevent
         corruption.
+
+        Note: This is a blocking operation. Use save_database_async() for non-blocking saves.
 
         Returns:
             Number of stations saved, or 0 on error

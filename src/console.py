@@ -277,6 +277,10 @@ class FrameHistory:
             self.max_size_bytes = 0
             self.current_size_bytes = 0
 
+        # Async save lock to prevent concurrent saves
+        self._save_lock = asyncio.Lock()
+        self._last_save_time = 0  # Track last save for monitoring
+
         # Note: load_from_disk() called explicitly after creation to display load info
 
     def add_frame(self, direction: str, raw_bytes: bytes):
@@ -302,10 +306,11 @@ class FrameHistory:
                 removed = self.frames.popleft()
                 self.current_size_bytes -= len(removed.raw_bytes)
 
-        # Auto-save periodically
+        # Auto-save periodically (async to avoid blocking)
         self.frames_since_save += 1
         if self.frames_since_save >= self.AUTO_SAVE_INTERVAL:
-            self.save_to_disk()
+            # Trigger async save without blocking
+            asyncio.create_task(self.save_to_disk_async())
             self.frames_since_save = 0
 
     def get_recent(self, count: int = None) -> List[FrameHistoryEntry]:
@@ -380,11 +385,35 @@ class FrameHistory:
                 removed = self.frames.popleft()
                 self.current_size_bytes -= len(removed.raw_bytes)
 
+    async def save_to_disk_async(self):
+        """Save frame buffer to disk asynchronously (non-blocking).
+
+        Uses asyncio.to_thread to run the blocking save operation in a thread pool,
+        preventing event loop blocking. Includes lock to prevent concurrent saves.
+        """
+        # Prevent concurrent saves
+        if self._save_lock.locked():
+            print_debug("Frame buffer save already in progress, skipping", level=3)
+            return
+
+        async with self._save_lock:
+            save_start = time.time()
+            try:
+                # Run blocking save in thread pool
+                await asyncio.to_thread(self.save_to_disk)
+                save_duration = time.time() - save_start
+                self._last_save_time = time.time()
+                print_debug(f"Frame buffer saved asynchronously in {save_duration:.2f}s", level=3)
+            except Exception as e:
+                print_error(f"Async frame buffer save failed: {e}")
+
     def save_to_disk(self):
         """Save frame buffer to disk (compressed JSON format).
 
         Saves frames to ~/.console_frame_buffer.json.gz for persistence
         across restarts.
+
+        Note: This is a blocking operation. Use save_to_disk_async() for non-blocking saves.
         """
         try:
             # Serialize frames to JSON-compatible format
@@ -1958,10 +1987,26 @@ class CommandProcessor:
     async def cmd_quit(self, args):
         """Quit the application."""
         print_info("Exiting...")
-        # Save APRS station database to disk
-        count = self.aprs_manager.save_database()
-        if count > 0:
-            print_info(f"Saved {count} station(s) to APRS database")
+
+        # Trigger async saves for both database and frame buffer
+        # This allows instant exit while saves complete in background
+        save_tasks = []
+
+        # Save APRS station database
+        save_tasks.append(self.aprs_manager.save_database_async())
+
+        # Save frame buffer
+        if hasattr(self, 'frame_history'):
+            save_tasks.append(self.frame_history.save_to_disk_async())
+
+        # Wait for both saves to complete (runs concurrently)
+        print_info("Saving database and frame buffer...")
+        results = await asyncio.gather(*save_tasks, return_exceptions=True)
+
+        # Report results
+        if len(results) >= 1 and isinstance(results[0], int) and results[0] > 0:
+            print_info(f"Saved {results[0]} station(s) to APRS database")
+
         self.radio.running = False
 
     async def cmd_tnc(self, args, auto_connect=None):
@@ -3695,8 +3740,11 @@ async def heartbeat_monitor(radio):
 
 
 async def autosave_monitor(radio):
-    """Periodic auto-save of APRS database every 5 minutes."""
-    AUTOSAVE_INTERVAL = 300  # 5 minutes in seconds
+    """Periodic auto-save of APRS database and frame buffer every 2 minutes.
+
+    Uses async saves to avoid blocking the event loop. Saves run in thread pool.
+    """
+    AUTOSAVE_INTERVAL = 120  # 2 minutes (increased frequency for better data safety)
 
     while radio.running:
         try:
@@ -3705,16 +3753,23 @@ async def autosave_monitor(radio):
             if not radio.running:
                 break
 
-            # Save the APRS database
+            # Save both database and frame buffer asynchronously (non-blocking)
+            save_tasks = []
+
+            # Save APRS database
             if hasattr(radio, 'aprs_manager') and radio.aprs_manager:
-                count = radio.aprs_manager.save_database()
-                if count > 0:
-                    print_debug(
-                        f"Auto-saved APRS database ({count} stations)",
-                        level=3
-                    )
-                else:
-                    print_debug("Auto-save failed", level=3)
+                save_tasks.append(radio.aprs_manager.save_database_async())
+
+            # Save frame buffer
+            if hasattr(radio, 'cmd_processor') and radio.cmd_processor and hasattr(radio.cmd_processor, 'frame_history'):
+                save_tasks.append(radio.cmd_processor.frame_history.save_to_disk_async())
+
+            # Run both saves concurrently
+            if save_tasks:
+                results = await asyncio.gather(*save_tasks, return_exceptions=True)
+                # Check results (first is station count, second is None)
+                if len(results) >= 1 and isinstance(results[0], int) and results[0] > 0:
+                    print_debug(f"Auto-saved APRS database and frame buffer", level=3)
 
         except Exception as e:
             print_error(f"Auto-save monitor error: {e}")
@@ -4236,10 +4291,10 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
             print_info("Shutting down Web UI...")
             await radio.web_server.stop()
 
-        # Save frame buffer to disk
+        # Save frame buffer to disk (async for faster shutdown)
         if hasattr(radio, 'cmd_processor') and radio.cmd_processor:
             print_info("Saving frame buffer...")
-            radio.cmd_processor.frame_history.save_to_disk()
+            await radio.cmd_processor.frame_history.save_to_disk_async()
 
         print_info("Disconnecting...")
 
