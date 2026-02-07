@@ -17,7 +17,7 @@ import time
 import traceback
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 from bleak import BleakClient, BleakScanner
