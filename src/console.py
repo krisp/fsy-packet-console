@@ -416,9 +416,13 @@ class FrameHistory:
         Note: This is a blocking operation. Use save_to_disk_async() for non-blocking saves.
         """
         try:
+            # Take a snapshot of frames to avoid "deque mutated during iteration" error
+            # (frames may be added by background tasks while we're saving)
+            frames_snapshot = list(self.frames)
+
             # Serialize frames to JSON-compatible format
             frames_data = []
-            for frame in self.frames:
+            for frame in frames_snapshot:
                 frames_data.append({
                     'timestamp': frame.timestamp.isoformat(),
                     'direction': frame.direction,
@@ -2002,14 +2006,27 @@ class CommandProcessor:
         """Quit the application."""
         print_info("Exiting...")
 
-        # Trigger async saves for both database and frame buffer
-        # This allows instant exit while saves complete in background
+        # Stop accepting new frames/packets FIRST
+        self.radio.running = False
+
+        # Close the TNC connection to stop frame reception
+        if hasattr(self.radio, 'transport') and self.radio.transport:
+            try:
+                await self.radio.transport.close()
+                print_debug("TNC connection closed", level=2)
+            except Exception as e:
+                print_debug(f"Error closing TNC: {e}", level=2)
+
+        # Give background tasks a moment to finish
+        await asyncio.sleep(0.2)
+
+        # Now save - TNC closed, no more frames being added
         save_tasks = []
 
         # Save APRS station database
         save_tasks.append(self.aprs_manager.save_database_async())
 
-        # Save frame buffer
+        # Save frame buffer (now safe - TNC closed)
         if hasattr(self, 'frame_history'):
             save_tasks.append(self.frame_history.save_to_disk_async())
 
@@ -2020,8 +2037,6 @@ class CommandProcessor:
         # Report results
         if len(results) >= 1 and isinstance(results[0], int) and results[0] > 0:
             print_info(f"Saved {results[0]} station(s) to APRS database")
-
-        self.radio.running = False
 
     async def cmd_tnc(self, args, auto_connect=None):
         """TNC commands and terminal mode.
@@ -4330,10 +4345,8 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
             print_info("Shutting down Web UI...")
             await radio.web_server.stop()
 
-        # Save frame buffer to disk (async for faster shutdown)
-        if hasattr(radio, 'cmd_processor') and radio.cmd_processor:
-            print_info("Saving frame buffer...")
-            await radio.cmd_processor.frame_history.save_to_disk_async()
+        # Note: Frame buffer and database already saved by cmd_quit() or autosave
+        # No need to save again here (would be redundant with async saves)
 
         print_info("Disconnecting...")
 
