@@ -4024,6 +4024,7 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
         print_info("Debug mode enabled at startup")
 
     print_header(f"FSY Packet Console v{constants.VERSION}")
+    print_info("Starting initialization...")
 
     rx_queue = asyncio.Queue()
     tnc_queue = asyncio.Queue()
@@ -4033,22 +4034,33 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
     client = None
     is_shutting_down = False
 
-    # Load TNC config early to get RADIO_MAC if needed for BLE mode
-    tnc_config_early = None
+    # Load TNC config early (all modes) for parallel startup
+    tnc_config = TNCConfig()
+
+    # Determine BLE MAC address if in BLE mode
     if not serial_port and not tcp_host:
         # BLE mode - need to determine MAC address
-        tnc_config_early = TNCConfig()
-
-        # Determine MAC address: command-line overrides config
+        # Command-line overrides config
         if radio_mac:
             ble_mac = radio_mac
-        elif tnc_config_early.settings.get("RADIO_MAC"):
-            ble_mac = tnc_config_early.settings.get("RADIO_MAC")
+        elif tnc_config.settings.get("RADIO_MAC"):
+            ble_mac = tnc_config.settings.get("RADIO_MAC")
         else:
             print_error("No radio MAC address configured")
             print_error("Set via command line: -r/--radio-mac MAC_ADDRESS")
             print_error("Or in TNC mode: RADIO_MAC 38:D2:00:01:62:C2")
             return
+
+    # Create APRS manager early so database can load in parallel with radio connection
+    mycall = tnc_config.get("MYCALL") or "NOCALL"
+    retry_count = int(tnc_config.get("RETRY") or "3")
+    retry_fast = int(tnc_config.get("RETRY_FAST") or "20")
+    retry_slow = int(tnc_config.get("RETRY_SLOW") or "600")
+    aprs_manager = APRSManager(mycall, max_retries=retry_count,
+                               retry_fast=retry_fast, retry_slow=retry_slow)
+
+    # Start database load immediately (runs in parallel with radio connection below)
+    database_load_task = asyncio.create_task(aprs_manager.load_database_async())
 
     # Serial mode
     if serial_port:
@@ -4153,12 +4165,11 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
             transport = BLETransport(client, rx_queue, tnc_queue)
 
             # Auto-save the working MAC address to config (if different or not set)
-            if tnc_config_early:
-                stored_mac = tnc_config_early.settings.get("RADIO_MAC")
-                if stored_mac != ble_mac:
-                    print_info(f"Saving radio MAC {ble_mac} to config")
-                    tnc_config_early.set("RADIO_MAC", ble_mac)
-                    tnc_config_early.save()
+            stored_mac = tnc_config.settings.get("RADIO_MAC")
+            if stored_mac != ble_mac:
+                print_info(f"Saving radio MAC {ble_mac} to config")
+                tnc_config.set("RADIO_MAC", ble_mac)
+                tnc_config.save()
 
         except Exception as e:
             print_error(f"BLE connection failed: {e}")
@@ -4168,12 +4179,12 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
     try:
         radio = RadioController(transport, rx_queue, tnc_queue)
 
+        # Attach APRS manager (database loading in background)
+        radio.aprs_manager = aprs_manager
+
         # Create shared AX25Adapter that will be used by both CommandProcessor and AGWPE
         # This prevents the two-adapter conflict where one sets _pending_connect
         # but the other receives the UA frames
-
-        # Reuse the config from BLE setup if available, otherwise create new one
-        tnc_config = tnc_config_early if tnc_config_early else TNCConfig()
         shared_ax25 = AX25Adapter(
             radio,
             get_mycall=lambda: tnc_config.get("MYCALL"),
@@ -4182,14 +4193,6 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
         # Store on radio object so CommandProcessor can access it
         radio.shared_ax25 = shared_ax25
 
-        # Create APRS manager (database loaded in parallel below)
-        mycall = tnc_config.get("MYCALL") or "NOCALL"
-        retry_count = int(tnc_config.get("RETRY") or "3")
-        retry_fast = int(tnc_config.get("RETRY_FAST") or "20")
-        retry_slow = int(tnc_config.get("RETRY_SLOW") or "600")
-        radio.aprs_manager = APRSManager(mycall, max_retries=retry_count,
-                                        retry_fast=retry_fast, retry_slow=retry_slow)
-
         # Create digipeater (read state from TNC config)
         digipeat_value = tnc_config.get("DIGIPEAT") or ""
         digipeat_enabled = digipeat_value.upper() == "ON"
@@ -4197,14 +4200,12 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
         radio.digipeater = Digipeater(mycall, my_alias=myalias, enabled=digipeat_enabled)
 
         # ========================================================================
-        # PARALLEL STARTUP: Run all initialization concurrently
+        # PARALLEL STARTUP: Complete all initialization
         # ========================================================================
-        print_info("Starting parallel initialization...")
-
         startup_tasks = []
 
-        # Task 1: Load database
-        startup_tasks.append(radio.aprs_manager.load_database_async())
+        # Task 1: Wait for database load (already running in background)
+        startup_tasks.append(database_load_task)
 
         # Task 2: Start TNC bridge (if not TCP client mode)
         async def start_tnc_bridge():
