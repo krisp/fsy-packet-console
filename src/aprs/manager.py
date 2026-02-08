@@ -144,8 +144,8 @@ class APRSManager:
         self._save_lock = asyncio.Lock()
         self._last_save_time = 0  # Track last save for monitoring
 
-        # Load persistent database
-        self.load_database()
+        # Note: Database will be loaded explicitly with load_database()
+        # or load_database_async() after initialization
 
     def set_web_broadcast_callback(self, callback):
         """Register callback for web UI real-time updates.
@@ -454,14 +454,25 @@ class APRSManager:
             traceback.print_exc()
             return 0
 
+    async def load_database_async(self):
+        """Load APRS station database from disk asynchronously (non-blocking).
+
+        Uses asyncio.to_thread to run the blocking load operation in a thread pool,
+        allowing parallel loading with other startup tasks.
+        """
+        print_info("Loading APRS database...")
+        await asyncio.to_thread(self.load_database)
+
     def load_database(self):
-        """Load APRS station database from disk.
+        """Load APRS station database from disk (blocking).
 
         Loads previously saved stations, positions, and weather data.
         If file doesn't exist or is corrupt, starts with empty database.
 
         Supports both GZIP compressed (.json.gz) and legacy plain JSON (.json) formats.
         Automatically migrates from .json to .json.gz on first save.
+
+        Note: For async loading during startup, use load_database_async().
         """
         load_start = time.time()
 

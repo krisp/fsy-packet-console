@@ -452,11 +452,25 @@ class FrameHistory:
             import traceback
             print_debug(traceback.format_exc(), level=3)
 
+    async def load_from_disk_async(self) -> dict:
+        """Load frame buffer from disk asynchronously (non-blocking).
+
+        Uses asyncio.to_thread to run the blocking load operation in a thread pool,
+        allowing parallel loading with other startup tasks.
+
+        Returns:
+            dict with keys: loaded (bool), frame_count (int), start_frame (int),
+            file_size_kb (float), corrupted_frames (int)
+        """
+        return await asyncio.to_thread(self.load_from_disk)
+
     def load_from_disk(self) -> dict:
-        """Load frame buffer from disk if available.
+        """Load frame buffer from disk if available (blocking).
 
         Restores frames from ~/.console_frame_buffer.json.gz to maintain
         debugging history across restarts.
+
+        Note: For async loading during startup, use load_from_disk_async().
 
         Returns:
             dict with keys: loaded (bool), frame_count (int), start_frame (int),
@@ -3871,9 +3885,11 @@ async def connection_watcher(radio):
             print_error(f"Connection watcher error: {e}")
 
 
-async def command_loop(radio, auto_tnc=False, auto_connect=None, serial_mode=False):
+async def command_loop(radio, processor=None, auto_tnc=False, auto_connect=None, serial_mode=False):
     """Command input loop with pinned prompt."""
-    processor = CommandProcessor(radio, serial_mode=serial_mode)
+    # Use provided processor or create new one
+    if processor is None:
+        processor = CommandProcessor(radio, serial_mode=serial_mode)
 
     # Register command processor with APRS manager for GPS access
     if hasattr(radio, 'aprs_manager') and radio.aprs_manager:
@@ -4151,7 +4167,7 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
         # Store on radio object so CommandProcessor can access it
         radio.shared_ax25 = shared_ax25
 
-        # Create APRS manager early so web server can use it
+        # Create APRS manager (database loaded in parallel below)
         mycall = tnc_config.get("MYCALL") or "NOCALL"
         retry_count = int(tnc_config.get("RETRY") or "3")
         retry_fast = int(tnc_config.get("RETRY_FAST") or "20")
@@ -4165,10 +4181,20 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
         myalias = tnc_config.get("MYALIAS") or ""
         radio.digipeater = Digipeater(mycall, my_alias=myalias, enabled=digipeat_enabled)
 
-        # Only start TNC/AGWPE bridges if NOT in TCP client mode
-        # (TCP mode acts as client to external TNC, not a server for other apps)
-        if not tcp_host:
-            # Start TNC TCP bridge (with error handling to survive bind failures)
+        # ========================================================================
+        # PARALLEL STARTUP: Run all initialization concurrently
+        # ========================================================================
+        print_info("Starting parallel initialization...")
+
+        startup_tasks = []
+
+        # Task 1: Load database
+        startup_tasks.append(radio.aprs_manager.load_database_async())
+
+        # Task 2: Start TNC bridge (if not TCP client mode)
+        async def start_tnc_bridge():
+            if tcp_host:
+                return  # Bridges disabled in TCP client mode
             try:
                 tnc_host = tnc_config.get("TNC_HOST") or "0.0.0.0"
                 tnc_port = int(tnc_config.get("TNC_PORT") or "8001")
@@ -4176,23 +4202,26 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
                 await radio.tnc_bridge.start(host=tnc_host)
             except OSError as e:
                 print_error(f"TNC bridge failed to bind to {tnc_host}:{tnc_port} - {e}")
-                print_error(f"  Port may be in use or address unavailable. Fix with: TNC_HOST/TNC_PORT")
                 radio.tnc_bridge = None
             except Exception as e:
                 print_error(f"Failed to start TNC bridge: {e}")
                 radio.tnc_bridge = None
 
-            # Start AGWPE-compatible bridge (with error handling to survive bind failures)
+        startup_tasks.append(start_tnc_bridge())
+
+        # Task 3: Start AGWPE bridge (if not TCP client mode)
+        async def start_agwpe_bridge():
+            if tcp_host:
+                return  # Bridges disabled in TCP client mode
             try:
                 from src.agwpe_bridge import AGWPEBridge
-
                 agwpe_host = tnc_config.get("AGWPE_HOST") or "0.0.0.0"
                 agwpe_port = int(tnc_config.get("AGWPE_PORT") or "8000")
                 radio.agwpe_bridge = AGWPEBridge(
                     radio,
                     get_mycall=lambda: tnc_config.get("MYCALL"),
                     get_txdelay=lambda: tnc_config.get("TXDELAY"),
-                    ax25_adapter=shared_ax25,  # Use the shared adapter
+                    ax25_adapter=shared_ax25,
                 )
                 started = await radio.agwpe_bridge.start(host=agwpe_host, port=agwpe_port)
                 if not started:
@@ -4200,46 +4229,56 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
                     radio.agwpe_bridge = None
             except OSError as e:
                 print_error(f"AGWPE bridge failed to bind to {agwpe_host}:{agwpe_port} - {e}")
-                print_error(f"  Port may be in use or address unavailable. Fix with: AGWPE_HOST/AGWPE_PORT")
                 radio.agwpe_bridge = None
             except Exception as e:
                 print_error(f"Failed to start AGWPE bridge: {e}")
                 radio.agwpe_bridge = None
-        else:
+
+        startup_tasks.append(start_agwpe_bridge())
+
+        # Task 4: Start Web UI server
+        async def start_web_ui():
+            try:
+                webui_host = tnc_config.get("WEBUI_HOST") or "0.0.0.0"
+                webui_port = int(tnc_config.get("WEBUI_PORT") or "8002")
+                radio.web_server = WebServer(
+                    radio=radio,
+                    aprs_manager=radio.aprs_manager,
+                    get_mycall=lambda: tnc_config.get("MYCALL"),
+                    get_mylocation=lambda: tnc_config.get("MYLOCATION"),
+                    get_wxtrend=lambda: tnc_config.get("WXTREND")
+                )
+                started = await radio.web_server.start(host=webui_host, port=webui_port)
+                if started:
+                    print_info(f"Web UI started on http://{webui_host}:{webui_port}")
+                else:
+                    print_error("Web UI failed to start")
+                    radio.web_server = None
+            except OSError as e:
+                print_error(f"Web UI failed to bind to {webui_host}:{webui_port} - {e}")
+                radio.web_server = None
+            except Exception as e:
+                print_error(f"Failed to start Web UI: {e}")
+                radio.web_server = None
+
+        startup_tasks.append(start_web_ui())
+
+        # Wait for all startup tasks to complete
+        await asyncio.gather(*startup_tasks, return_exceptions=True)
+
+        if tcp_host:
             print_info("TNC/AGWPE bridges disabled (TCP client mode)")
 
-        # Start Web UI Server (with error handling to survive bind failures)
-        try:
-            webui_host = tnc_config.get("WEBUI_HOST") or "0.0.0.0"
-            webui_port = int(tnc_config.get("WEBUI_PORT") or "8002")
-            print_info(f"Starting Web UI server on port {webui_port}...")
+        # Create CommandProcessor (loads frame buffer)
+        serial_mode = (serial_port is not None or tcp_host is not None)
+        processor = CommandProcessor(radio, serial_mode=serial_mode)
 
-            radio.web_server = WebServer(
-                radio=radio,
-                aprs_manager=radio.aprs_manager,
-                get_mycall=lambda: tnc_config.get("MYCALL"),
-                get_mylocation=lambda: tnc_config.get("MYLOCATION"),
-                get_wxtrend=lambda: tnc_config.get("WXTREND")
-            )
+        # Register command processor with APRS manager for GPS access
+        if hasattr(radio, 'aprs_manager') and radio.aprs_manager:
+            radio.aprs_manager._cmd_processor = processor
 
-            started = await radio.web_server.start(host=webui_host, port=webui_port)
-            if started:
-                print_info(f"Web UI started on http://{webui_host}:{webui_port}")
-            else:
-                print_error("Web UI failed to start")
-                radio.web_server = None
-        except OSError as e:
-            print_error(f"Web UI failed to bind to {webui_host}:{webui_port} - {e}")
-            print_error(f"  Port may be in use or address unavailable. Fix with: WEBUI_HOST/WEBUI_PORT")
-            radio.web_server = None
-        except Exception as e:
-            print_error(f"Failed to start Web UI: {e}")
-            radio.web_server = None
-
-        # Auto-connect to weather station if enabled
-        # Wait until CommandProcessor is created (happens in processor creation below)
-        # We'll connect after command_loop starts
-
+        # Now ALL initialization is truly complete (including frame buffer)
+        print_info("All components initialized")
         print_info("Monitoring TNC traffic...")
 
         # Create background task list
@@ -4257,12 +4296,13 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
                 asyncio.create_task(heartbeat_monitor(radio)),
             ])
 
-        # Add command loop
+        # Add command loop with pre-initialized processor
         tasks.append(
             asyncio.create_task(
                 command_loop(
-                    radio, auto_tnc=auto_tnc, auto_connect=auto_connect,
-                    serial_mode=(serial_port is not None or tcp_host is not None)
+                    radio, processor=processor,
+                    auto_tnc=auto_tnc, auto_connect=auto_connect,
+                    serial_mode=serial_mode
                 )
             )
         )
