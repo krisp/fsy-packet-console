@@ -848,7 +848,7 @@ class AGWPEBridge:
 
             # Build monitor frame header
             if timestamp is None:
-                timestamp = datetime.now()
+                timestamp = datetime.now(timezone.utc)
 
             time_str = timestamp.strftime("%H:%M:%S")
 

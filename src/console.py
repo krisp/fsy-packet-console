@@ -1579,7 +1579,7 @@ class CommandProcessor:
         last_beacon_str = self.tnc_config.get("LAST_BEACON")
         if last_beacon_str:
             try:
-                self.last_beacon_time = datetime.fromisoformat(last_beacon_str)
+                self.last_beacon_time = datetime.fromisoformat(last_beacon_str).astimezone(timezone.utc)
                 print_debug(f"Loaded last beacon time: {self.last_beacon_time}", level=6)
             except (ValueError, TypeError):
                 self.last_beacon_time = None
@@ -2813,7 +2813,7 @@ class CommandProcessor:
                         beacon_interval = int(self.tnc_config.get("BEACON_INTERVAL") or "10")
 
                         # Check if it's time to beacon
-                        now = datetime.now()
+                        now = datetime.now(timezone.utc)
                         should_beacon = False
 
                         if self.last_beacon_time is None:
@@ -2836,7 +2836,7 @@ class CommandProcessor:
                         beacon_interval = int(self.tnc_config.get("BEACON_INTERVAL") or "10")
 
                         # Check if it's time to beacon
-                        now = datetime.now()
+                        now = datetime.now(timezone.utc)
                         should_beacon = False
 
                         if self.last_beacon_time is None:
@@ -3008,7 +3008,7 @@ class CommandProcessor:
             await self.radio.send_aprs(mycall, info, to_call="APRS", path=path)
 
             # Update timestamp (both in-memory and persisted to config)
-            now = datetime.now()
+            now = datetime.now(timezone.utc)
             self.last_beacon_time = now
             self.tnc_config.set("LAST_BEACON", now.isoformat())
 
