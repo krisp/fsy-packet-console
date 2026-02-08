@@ -2009,16 +2009,28 @@ class CommandProcessor:
         # Stop accepting new frames/packets FIRST
         self.radio.running = False
 
-        # Close the TNC connection to stop frame reception
+        # Wait for background tasks to finish (tnc_monitor, autosave, gps, heartbeat, etc.)
+        # They check radio.running and will exit their loops
+        if hasattr(self.radio, 'background_tasks'):
+            try:
+                # Wait up to 2 seconds for all tasks to finish
+                await asyncio.wait_for(
+                    asyncio.gather(*self.radio.background_tasks, return_exceptions=True),
+                    timeout=2.0
+                )
+                print_debug("Background tasks stopped", level=2)
+            except asyncio.TimeoutError:
+                print_debug("Background tasks did not stop in time, proceeding anyway", level=2)
+            except Exception as e:
+                print_debug(f"Error waiting for background tasks: {e}", level=2)
+
+        # Now close the TNC connection (after tasks have stopped using it)
         if hasattr(self.radio, 'transport') and self.radio.transport:
             try:
                 await self.radio.transport.close()
                 print_debug("TNC connection closed", level=2)
             except Exception as e:
                 print_debug(f"Error closing TNC: {e}", level=2)
-
-        # Give background tasks a moment to finish
-        await asyncio.sleep(0.2)
 
         # Now save - TNC closed, no more frames being added
         save_tasks = []
@@ -4298,7 +4310,7 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
         print_info("Monitoring TNC traffic...")
 
         # Create background task list
-        tasks = [
+        background_tasks = [
             asyncio.create_task(tnc_monitor(tnc_queue, radio)),
             asyncio.create_task(message_retry_monitor(radio)),
             asyncio.create_task(autosave_monitor(radio)),
@@ -4307,10 +4319,16 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
 
         # Add BLE-only monitors
         if not serial_port and not tcp_host:
-            tasks.extend([
+            background_tasks.extend([
                 asyncio.create_task(connection_watcher(radio)),
                 asyncio.create_task(heartbeat_monitor(radio)),
             ])
+
+        # Store background tasks on radio for graceful shutdown
+        radio.background_tasks = background_tasks
+
+        # Create full task list including command loop
+        tasks = background_tasks.copy()
 
         # Add command loop with pre-initialized processor
         tasks.append(
