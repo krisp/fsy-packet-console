@@ -137,6 +137,47 @@ class TNCCommandHandler(CommandHandler):
         else:
             print_error("Failed to set MYLOCATION")
 
+    @command("WEBUI_PASSWORD",
+             help_text="Set password for Web UI POST endpoints",
+             usage="WEBUI_PASSWORD [password]",
+             category="config")
+    async def webui_password(self, args):
+        """Display or set password for Web UI POST API endpoints.
+
+        When set, POST endpoints like /api/beacon/comment require this password
+        for authentication. Leave empty to disable POST endpoints.
+
+        Examples:
+            WEBUI_PASSWORD              - Show if password is set (not the password itself)
+            WEBUI_PASSWORD mysecret     - Set password to 'mysecret'
+            WEBUI_PASSWORD ""           - Clear password (disables POST endpoints)
+        """
+        if not args:
+            password = self.tnc_config.get('WEBUI_PASSWORD')
+            if password:
+                print_pt("WEBUI_PASSWORD: (set)")
+                print_pt("")
+                print_pt("POST API endpoints are ENABLED")
+                print_pt("Example: POST /api/beacon/comment")
+            else:
+                print_pt("WEBUI_PASSWORD: (not set)")
+                print_pt("")
+                print_pt("POST API endpoints are DISABLED")
+            return
+
+        # Handle empty string to clear password
+        if args[0] == '""' or args[0] == "''":
+            self.tnc_config.set("WEBUI_PASSWORD", "")
+            print_info("WEBUI_PASSWORD cleared - POST endpoints disabled")
+            return
+
+        password = args[0]
+        self.tnc_config.set("WEBUI_PASSWORD", password)
+        print_info("WEBUI_PASSWORD set successfully")
+        print_pt("")
+        print_pt("POST API endpoints are now ENABLED")
+        print_pt("Keep this password secure!")
+
     @command("UNPROTO",
              help_text="Set destination for unconnected frames",
              usage="UNPROTO <destination> [via <path>]",
@@ -379,7 +420,7 @@ class TNCCommandHandler(CommandHandler):
             'DEBUG_BUFFER',
             # Server Ports
             'AGWPE_HOST', 'AGWPE_PORT', 'TNC_HOST', 'TNC_PORT',
-            'WEBUI_HOST', 'WEBUI_PORT',
+            'WEBUI_HOST', 'WEBUI_PORT', 'WEBUI_PASSWORD',
             # Weather Station
             'WX_ENABLE', 'WX_BACKEND', 'WX_ADDRESS', 'WX_PORT',
             'WX_INTERVAL', 'WX_AVERAGE_WIND', 'WXTREND',

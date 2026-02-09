@@ -603,6 +603,7 @@ class TNCConfig:
             "TNC_PORT": "8001",    # TNC TCP bridge port
             "WEBUI_HOST": "0.0.0.0",  # Web UI bind address (0.0.0.0=all, 127.0.0.1=localhost)
             "WEBUI_PORT": "8002",  # Web UI HTTP server port
+            "WEBUI_PASSWORD": "",  # Password for POST API endpoints (empty = disabled)
             "WX_ENABLE": "OFF",  # Enable weather station integration
             "WX_BACKEND": "ecowitt",  # Backend type: ecowitt, davis, ambient, etc.
             "WX_ADDRESS": "",  # IP address (http) or serial port path (serial)
@@ -782,6 +783,7 @@ class TNCCompleter(Completer):
             "TNC_PORT",
             "WEBUI_HOST",
             "WEBUI_PORT",
+            "WEBUI_PASSWORD",
             "WX_ENABLE",
             "WX_BACKEND",
             "WX_ADDRESS",
@@ -841,6 +843,7 @@ class TNCCompleter(Completer):
             "TNC_PORT": "Set TNC bridge port (default: 8001)",
             "WEBUI_HOST": "Set Web UI bind address (0.0.0.0=all, 127.0.0.1=localhost)",
             "WEBUI_PORT": "Set Web UI port (default: 8002)",
+            "WEBUI_PASSWORD": "Set password for Web UI POST endpoints (empty = disabled)",
             "WX_ENABLE": "Enable/disable weather station (ON/OFF)",
             "WX_BACKEND": "Set weather station backend (ecowitt, davis, etc.)",
             "WX_ADDRESS": "Set weather station IP or serial port",
@@ -1446,7 +1449,7 @@ class CommandCompleter(Completer):
 
 
 class CommandProcessor:
-    def __init__(self, radio, serial_mode=False):
+    def __init__(self, radio, serial_mode=False, tnc_config=None):
         self.radio = radio
         self.serial_mode = serial_mode  # True if using serial TNC (no radio control)
         self.console_mode = "aprs" if serial_mode else "radio"  # Start in APRS mode for serial
@@ -1482,7 +1485,8 @@ class CommandProcessor:
             "exit": self.cmd_quit,
         }
         # TNC configuration and state
-        self.tnc_config = TNCConfig()
+        # Use provided config or create new one (for shared instance across command processor and web server)
+        self.tnc_config = tnc_config if tnc_config is not None else TNCConfig()
         self.tnc_connected_to = None
         self.tnc_mode = False
         self.tnc_conversation_mode = (
@@ -4274,7 +4278,8 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
                     aprs_manager=radio.aprs_manager,
                     get_mycall=lambda: tnc_config.get("MYCALL"),
                     get_mylocation=lambda: tnc_config.get("MYLOCATION"),
-                    get_wxtrend=lambda: tnc_config.get("WXTREND")
+                    get_wxtrend=lambda: tnc_config.get("WXTREND"),
+                    tnc_config=tnc_config
                 )
                 started = await radio.web_server.start(host=webui_host, port=webui_port)
                 if started:
@@ -4298,8 +4303,9 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
             print_info("TNC/AGWPE bridges disabled (TCP client mode)")
 
         # Create CommandProcessor (loads frame buffer)
+        # Pass tnc_config so command processor and web server share the same instance
         serial_mode = (serial_port is not None or tcp_host is not None)
-        processor = CommandProcessor(radio, serial_mode=serial_mode)
+        processor = CommandProcessor(radio, serial_mode=serial_mode, tnc_config=tnc_config)
 
         # Register command processor with APRS manager for GPS access
         if hasattr(radio, 'aprs_manager') and radio.aprs_manager:

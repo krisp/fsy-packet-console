@@ -188,7 +188,7 @@ def serialize_station(station: APRSStation, include_history: bool = False) -> Di
 class APIHandlers:
     """HTTP request handlers for the APRS Web API."""
 
-    def __init__(self, aprs_manager, get_mycall, start_time, get_mylocation=None, get_wxtrend=None):
+    def __init__(self, aprs_manager, get_mycall, start_time, get_mylocation=None, get_wxtrend=None, tnc_config=None, send_beacon=None):
         """Initialize API handlers.
 
         Args:
@@ -197,12 +197,16 @@ class APIHandlers:
             start_time: Server start datetime
             get_mylocation: Callable that returns current MYLOCATION (optional)
             get_wxtrend: Callable that returns current WXTREND threshold (optional)
+            tnc_config: TNCConfig instance for POST endpoints (optional)
+            send_beacon: Callable to send position beacon (optional)
         """
         self.aprs = aprs_manager
         self.get_mycall = get_mycall
         self.get_mylocation = get_mylocation or (lambda: "")
         self.get_wxtrend = get_wxtrend or (lambda: "0.3")
         self.start_time = start_time
+        self.tnc_config = tnc_config
+        self.send_beacon = send_beacon
 
     async def handle_get_stations(self, request: web.Request) -> web.Response:
         """GET /api/stations - Get all stations with optional sorting.
@@ -869,6 +873,107 @@ class APIHandlers:
             "total_count": len(network_stats),
             "returned_count": len(limited_stats)
         })
+
+    async def handle_update_beacon_comment(self, request: web.Request) -> web.Response:
+        """POST /api/beacon/comment - Update beacon comment (requires password).
+
+        Body params (JSON):
+            password: Required - WEBUI_PASSWORD from config
+            comment: Required - New beacon comment text (max 43 chars, will be truncated)
+            tx: Optional - If true, send beacon immediately (default: false)
+            quiet: Optional - If true, return minimal response (default: false)
+
+        Returns:
+            JSON with success status, updated comment, and beacon status (unless quiet=true)
+        """
+        # Check if password is configured
+        if not self.tnc_config:
+            return web.json_response({
+                "success": False,
+                "error": "API not configured"
+            }, status=500)
+
+        configured_password = self.tnc_config.get("WEBUI_PASSWORD")
+        if not configured_password:
+            return web.json_response({
+                "success": False,
+                "error": "API endpoint disabled (WEBUI_PASSWORD not set)"
+            }, status=403)
+
+        # Parse JSON body
+        try:
+            data = await request.json()
+        except Exception as e:
+            return web.json_response({
+                "success": False,
+                "error": f"Invalid JSON: {e}"
+            }, status=400)
+
+        # Validate password
+        provided_password = data.get("password", "")
+        if provided_password != configured_password:
+            # Log failed attempt
+            print(f"WARNING: Failed beacon comment update attempt from {request.remote}")
+            return web.json_response({
+                "success": False,
+                "error": "Invalid password"
+            }, status=403)
+
+        # Get and validate comment
+        comment = data.get("comment", "")
+        if not comment:
+            return web.json_response({
+                "success": False,
+                "error": "Comment parameter required"
+            }, status=400)
+
+        # Truncate if needed (APRS spec allows up to 43 chars in comment)
+        truncated = False
+        if len(comment) > 43:
+            comment = comment[:43]
+            truncated = True
+
+        # Update config
+        self.tnc_config.set("BEACON_COMMENT", comment)
+        self.tnc_config.save()
+
+        # Get optional parameters
+        tx = data.get("tx", False)
+        quiet = data.get("quiet", False)
+
+        # Send beacon if requested
+        beacon_sent = False
+        if tx and self.send_beacon:
+            try:
+                await self.send_beacon()
+                beacon_sent = True
+            except Exception as e:
+                print(f"ERROR: Failed to send beacon: {e}")
+
+        # Build response
+        if quiet:
+            return web.json_response({
+                "success": True,
+                "comment": comment
+            })
+        else:
+            # Return full beacon status
+            beacon_status = {
+                "enabled": self.tnc_config.get("BEACON"),
+                "interval": int(self.tnc_config.get("BEACON_INTERVAL")),
+                "path": self.tnc_config.get("BEACON_PATH"),
+                "symbol": self.tnc_config.get("BEACON_SYMBOL"),
+                "comment": comment,
+                "last_beacon": self.tnc_config.get("LAST_BEACON")
+            }
+
+            return web.json_response({
+                "success": True,
+                "comment": comment,
+                "truncated": truncated,
+                "beacon_status": beacon_status,
+                "beacon_sent": beacon_sent
+            })
 
     def _parse_time_range(self, range_param: str) -> Optional[datetime]:
         """Parse time range parameter into cutoff datetime.

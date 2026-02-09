@@ -828,6 +828,25 @@ aprs> ?                               # Quick help
 - **Position updates** from mobile stations
 - **Auto-scroll** to latest activity
 
+### HTTP POST API (NEW in v0.9.0)
+- **Authenticated endpoint** for remote beacon comment updates
+- **POST /api/beacon/comment** - Update beacon comment via HTTP
+- **Password-based security** (configurable via `WEBUI_PASSWORD`)
+- **Optional immediate transmission** - Send beacon after update
+- **IoT/automation friendly** - Perfect for remote monitoring and control
+- **Example:** Update comment from GPS tracker, weather station, or monitoring system
+- **Documentation:** See `doc/WEBUI_POST_API.md` for complete API reference
+
+```bash
+# Set password
+WEBUI_PASSWORD your_secure_password
+
+# Update comment via cURL
+curl -X POST http://localhost:8002/api/beacon/comment \
+  -H "Content-Type: application/json" \
+  -d '{"password":"your_secure_password","comment":"Updated from API!"}'
+```
+
 ---
 
 ## 🔌 Integration with Other Software

@@ -23,7 +23,7 @@ from .web_api import APIHandlers, serialize_station, serialize_weather
 class WebServer:
     """Async web server for APRS console UI."""
 
-    def __init__(self, radio, aprs_manager, get_mycall: Callable[[], str], get_mylocation: Callable[[], str] = None, get_wxtrend: Callable[[], str] = None):
+    def __init__(self, radio, aprs_manager, get_mycall: Callable[[], str], get_mylocation: Callable[[], str] = None, get_wxtrend: Callable[[], str] = None, tnc_config=None):
         """Initialize web server.
 
         Args:
@@ -32,12 +32,14 @@ class WebServer:
             get_mycall: Callable that returns current MYCALL
             get_mylocation: Callable that returns current MYLOCATION (optional)
             get_wxtrend: Callable that returns current WXTREND threshold (optional)
+            tnc_config: TNCConfig instance for POST API endpoints (optional)
         """
         self.radio = radio
         self.aprs = aprs_manager
         self.get_mycall = get_mycall
         self.get_mylocation = get_mylocation or (lambda: "")
         self.get_wxtrend = get_wxtrend or (lambda: "0.3")
+        self.tnc_config = tnc_config
         self.app = None
         self.runner = None
         self.site = None
@@ -72,7 +74,20 @@ class WebServer:
             ])
 
             # Create API handlers
-            api_handlers = APIHandlers(self.aprs, self.get_mycall, self.start_time, self.get_mylocation, self.get_wxtrend)
+            # Get send_beacon callable from radio.cmd_processor if available
+            send_beacon = None
+            if hasattr(self.radio, 'cmd_processor') and self.radio.cmd_processor:
+                send_beacon = self.radio.cmd_processor._send_position_beacon
+
+            api_handlers = APIHandlers(
+                self.aprs,
+                self.get_mycall,
+                self.start_time,
+                self.get_mylocation,
+                self.get_wxtrend,
+                self.tnc_config,
+                send_beacon
+            )
 
             # Setup routes
             self.app.router.add_get('/', self._handle_index)
@@ -103,9 +118,10 @@ class WebServer:
             self.app.router.add_get('/api/digipeater/heatmap', api_handlers.get_digipeater_heatmap)
             self.app.router.add_get('/api/digipeater/network', api_handlers.get_network_digipeater_stats)
 
-            # TODO: POST routes for message sending (requires authentication)
+            # POST routes (require authentication via WEBUI_PASSWORD)
             self.app.router.add_post('/api/messages', api_handlers.handle_send_message)
             self.app.router.add_post('/api/stations/paths', api_handlers.handle_get_station_paths)
+            self.app.router.add_post('/api/beacon/comment', api_handlers.handle_update_beacon_comment)
 
             # Start server
             server_start = time.time()
