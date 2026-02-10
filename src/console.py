@@ -898,7 +898,7 @@ class CommandCompleter(Completer):
                 radio_commands = ["status", "health", "vfo", "setvfo", "active", "dual",
                                 "scan", "squelch", "volume", "channel", "list", "power",
                                 "freq", "bss", "setbss", "poweron", "poweroff", "scan_ble",
-                                "notifications"]
+                                "notifications", "gps"]
                 commands = [c for c in commands if c not in radio_commands]
 
                 # In serial mode, also hide the "radio" command (can't switch to radio mode)
@@ -1480,6 +1480,7 @@ class CommandProcessor:
             "aprs": self._dispatch_aprs_command,  # Uses APRS handler
             "pws": self._dispatch_pws_command,  # Uses weather handler
             "scan_ble": self._dispatch_radio_command,  # Uses radio handler
+            "gps": self._dispatch_radio_command,  # Uses radio handler
             "tnc": self.cmd_tnc,
             "quit": self.cmd_quit,
             "exit": self.cmd_quit,
