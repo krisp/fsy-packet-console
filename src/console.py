@@ -3228,20 +3228,36 @@ def parse_and_track_aprs_frame(complete_frame, radio, timestamp=None, frame_numb
             # Filter iGate trace callsigns (appear AFTER unused WIDE/RELAY aliases)
             # Proper path order: used digis (*), then unused aliases (WIDE2-1)
             # Trace callsigns appear AFTER unused aliases (bad iGate behavior)
-            # Find first unused WIDE/RELAY and truncate path there
+            # Keep all unused WIDE/RELAY aliases, but truncate at first non-alias after them
+            if constants.DEBUG and filtered_path:
+                print_debug(f"TRACE: raw_path={raw_path}", level=2)
+                print_debug(f"TRACE: filtered_path (after Q-filter)={filtered_path}", level=2)
             final_path = []
+            seen_unused_alias = False
             for i, digi in enumerate(filtered_path):
                 digi_upper = digi.upper().rstrip('*')
                 is_unused_alias = (
                     not digi.endswith('*') and
                     (digi_upper.startswith('WIDE') or digi_upper.startswith('RELAY'))
                 )
+                if constants.DEBUG and filtered_path:
+                    print_debug(f"TRACE: loop i={i} digi={digi} is_unused_alias={is_unused_alias} seen={seen_unused_alias}", level=2)
                 if is_unused_alias:
-                    # Include the unused alias, but drop everything after it
+                    # Keep unused aliases (WIDE1-1, WIDE2-1, etc.)
                     final_path.append(digi)
+                    seen_unused_alias = True
+                    if constants.DEBUG:
+                        print_debug(f"TRACE:   -> appended {digi}, final_path={final_path}", level=2)
+                elif seen_unused_alias:
+                    # Non-alias callsign after unused alias = iGate trace, truncate here
+                    if constants.DEBUG:
+                        print_debug(f"TRACE:   -> breaking at {digi} (trace after unused alias)", level=2)
                     break
                 else:
+                    # Used digi (has *) or callsign before any unused alias
                     final_path.append(digi)
+                    if constants.DEBUG:
+                        print_debug(f"TRACE:   -> appended {digi} (used digi), final_path={final_path}", level=2)
 
             result['digipeater_path'] = final_path
 
