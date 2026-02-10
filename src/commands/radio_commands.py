@@ -6,6 +6,7 @@ power management, and diagnostic utilities.
 """
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from prompt_toolkit import HTML
 
@@ -822,6 +823,126 @@ class RadioCommandHandler(CommandHandler):
             print_info("✓ Radio powered off")
         else:
             print_error("Failed to power off radio")
+
+    @command("GPS",
+             help_text="Show GPS status or restart GPS polling",
+             usage="GPS [restart]",
+             category="radio")
+    async def gps(self, args):
+        """Show GPS status or restart GPS polling task."""
+        if args and args[0].lower() == "restart":
+            # Restart GPS polling task
+            print_info("Restarting GPS polling...")
+            success = await self._restart_gps_task()
+            if success:
+                print_info("✓ GPS polling restarted")
+            else:
+                print_error("Failed to restart GPS polling")
+            return
+
+        # Show GPS status
+        print_header("GPS Status")
+
+        # Check if command processor is available
+        if not hasattr(self.radio, 'cmd_processor') or not self.radio.cmd_processor:
+            print_error("Command processor not available")
+            return
+
+        cmd_proc = self.radio.cmd_processor
+
+        # Display lock status
+        lock_color = "green" if cmd_proc.gps_locked else "red"
+        lock_status = "LOCKED" if cmd_proc.gps_locked else "NO LOCK"
+        print_pt(HTML(f"Lock Status:   <{lock_color}>{lock_status}</{lock_color}>"))
+
+        # Display position if available
+        if cmd_proc.gps_position:
+            pos = cmd_proc.gps_position
+            print_pt(f"Latitude:      {pos['latitude']:.6f}°")
+            print_pt(f"Longitude:     {pos['longitude']:.6f}°")
+
+            if pos.get('altitude') is not None:
+                print_pt(f"Altitude:      {pos['altitude']} m")
+
+            if pos.get('speed') is not None:
+                print_pt(f"Speed:         {pos['speed']} km/h")
+
+            if pos.get('heading') is not None:
+                print_pt(f"Heading:       {pos['heading']}°")
+
+            if pos.get('accuracy') is not None:
+                print_pt(f"Accuracy:      {pos['accuracy']} m")
+
+            # Calculate time since last update
+            if pos.get('timestamp'):
+                age = int(time.time() - pos['timestamp'])
+                print_pt(f"Last Update:   {age}s ago")
+        else:
+            print_pt("Position:      Not available")
+
+        print_pt("")
+
+        # Show beacon status if available
+        if hasattr(cmd_proc, 'tnc_config'):
+            beacon_enabled = cmd_proc.tnc_config.get("BEACON") == "ON"
+            beacon_color = "green" if beacon_enabled else "gray"
+            beacon_status = "ENABLED" if beacon_enabled else "DISABLED"
+            print_pt(HTML(f"Beacon:        <{beacon_color}>{beacon_status}</{beacon_color}>"))
+
+            if beacon_enabled:
+                interval = cmd_proc.tnc_config.get("BEACON_INTERVAL") or "10"
+                print_pt(f"Interval:      {interval} minutes")
+
+                if cmd_proc.last_beacon_time:
+                    elapsed = int((datetime.now(timezone.utc) - cmd_proc.last_beacon_time).total_seconds())
+                    print_pt(f"Last Beacon:   {elapsed}s ago")
+
+        print_pt("")
+        print_info("Use 'GPS RESTART' to restart GPS polling task")
+        print_pt("")
+
+    async def _restart_gps_task(self):
+        """Restart the GPS polling task.
+
+        Returns:
+            bool: True if restart was successful, False otherwise
+        """
+        try:
+            # Find and cancel the existing GPS task
+            if hasattr(self.radio, 'background_tasks'):
+                for task in self.radio.background_tasks:
+                    # Check if this is the GPS task by examining its coroutine name
+                    # Note: Accessing _coro.cr_code.co_name is implementation-dependent
+                    # and may need adjustment in future Python versions
+                    if hasattr(task, '_coro') and hasattr(task._coro, 'cr_code'):
+                        if 'gps_monitor' in task._coro.cr_code.co_name:
+                            print_debug("Cancelling existing GPS task...", level=2)
+                            task.cancel()
+                            try:
+                                await task
+                            except asyncio.CancelledError:
+                                pass
+                            # Remove from background tasks list
+                            self.radio.background_tasks.remove(task)
+                            break
+
+            # Import gps_monitor here to avoid circular import
+            # (console.py imports RadioCommandHandler from this module)
+            from src.console import gps_monitor
+
+            # Create new GPS task
+            new_task = asyncio.create_task(gps_monitor(self.radio))
+
+            # Add to background tasks if the list exists
+            if hasattr(self.radio, 'background_tasks'):
+                self.radio.background_tasks.append(new_task)
+
+            print_debug("New GPS task created", level=2)
+            return True
+
+        except Exception as e:
+            print_error(f"Error restarting GPS task: {e}")
+            return False
 
     def _print_channel_details(self, channel):
         """Print formatted channel details."""
