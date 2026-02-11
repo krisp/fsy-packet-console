@@ -904,11 +904,30 @@ class RadioCommandHandler(CommandHandler):
     async def _restart_gps_task(self):
         """Restart the GPS polling task.
 
+        This function resets the GPS communication state by:
+        1. Flushing stale responses from the BLE rx_queue
+        2. Cancelling the existing GPS polling task
+        3. Creating a fresh GPS polling task
+
         Returns:
             bool: True if restart was successful, False otherwise
         """
         try:
-            # Find and cancel the existing GPS task
+            # Step 1: Flush stale GPS responses from rx_queue
+            # This clears any error responses that might be stuck in the queue
+            print_debug("Flushing rx_queue to clear stale GPS responses...", level=2)
+            flushed_count = 0
+            while not self.radio.rx_queue.empty():
+                try:
+                    _ = self.radio.rx_queue.get_nowait()
+                    flushed_count += 1
+                except asyncio.QueueEmpty:
+                    break
+
+            if flushed_count > 0:
+                print_debug(f"Flushed {flushed_count} stale response(s) from queue", level=2)
+
+            # Step 2: Find and cancel the existing GPS task
             if hasattr(self.radio, 'background_tasks'):
                 for task in self.radio.background_tasks:
                     # Check if this is the GPS task by examining its coroutine name
@@ -926,18 +945,18 @@ class RadioCommandHandler(CommandHandler):
                             self.radio.background_tasks.remove(task)
                             break
 
-            # Import gps_monitor here to avoid circular import
+            # Step 3: Import gps_monitor here to avoid circular import
             # (console.py imports RadioCommandHandler from this module)
             from src.console import gps_monitor
 
-            # Create new GPS task
+            # Step 4: Create new GPS task with clean state
             new_task = asyncio.create_task(gps_monitor(self.radio))
 
             # Add to background tasks if the list exists
             if hasattr(self.radio, 'background_tasks'):
                 self.radio.background_tasks.append(new_task)
 
-            print_debug("New GPS task created", level=2)
+            print_debug("New GPS task created with flushed queue", level=2)
             return True
 
         except Exception as e:

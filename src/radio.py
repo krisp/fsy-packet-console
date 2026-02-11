@@ -321,12 +321,15 @@ class RadioController:
             print_debug("get_gps_position: No response from GPS", level=5)
             return None
 
+        # Debug: Always show raw response to help diagnose issues
+        print_debug(f"GET_POSITION response ({len(resp)} bytes): {resp.hex()}", level=5)
+
         if len(resp) < 8:
             print_debug(f"get_gps_position: Response too short ({len(resp)} bytes)", level=5)
+            # Show status byte if available
+            if len(resp) >= 1:
+                print_debug(f"  Status byte: 0x{resp[0]:02x} ({resp[0]})", level=5)
             return None
-
-        # Debug: Show raw response
-        print_debug(f"GET_POSITION response ({len(resp)} bytes): {resp.hex()}", level=5)
 
         try:
             # Status byte (0 = SUCCESS)
