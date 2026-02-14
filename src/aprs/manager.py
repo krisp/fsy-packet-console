@@ -795,16 +795,20 @@ class APRSManager:
             True if message is for us
         """
         to_call_upper = to_call.upper().strip()
-        to_call_base = to_call_upper.split("-")[0]
 
-        result = (
-            to_call_upper == self.my_callsign
-            or to_call_upper == self.my_callsign_base
-            or to_call_base == self.my_callsign_base
-        )
+        # Normalize callsigns: K1FSY and K1FSY-0 are equivalent (SSID 0 is implicit)
+        # All other SSIDs are distinct stations
+        def normalize_ssid(callsign):
+            """Add explicit -0 if no SSID present."""
+            return callsign if "-" in callsign else callsign + "-0"
+
+        to_call_normalized = normalize_ssid(to_call_upper)
+        my_call_normalized = normalize_ssid(self.my_callsign)
+
+        result = (to_call_normalized == my_call_normalized)
 
         print_debug(
-            f"is_message_for_me: to_call='{to_call}' -> '{to_call_upper}' (base={to_call_base}), my_callsign='{self.my_callsign}' (base={self.my_callsign_base}), result={result}",
+            f"is_message_for_me: to_call='{to_call}' -> '{to_call_normalized}', my_callsign='{my_call_normalized}', result={result}",
             level=5,
         )
 
