@@ -4400,12 +4400,12 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
             asyncio.create_task(tnc_monitor(tnc_queue, radio)),
             asyncio.create_task(message_retry_monitor(radio)),
             asyncio.create_task(autosave_monitor(radio)),
-            asyncio.create_task(gps_monitor(radio)),  # Runs in both BLE and serial modes
         ]
 
-        # Add BLE-only monitors
+        # Add BLE-only monitors (GPS, connection, heartbeat)
         if not serial_port and not tcp_host:
             background_tasks.extend([
+                asyncio.create_task(gps_monitor(radio)),  # GPS only available in BLE mode
                 asyncio.create_task(connection_watcher(radio)),
                 asyncio.create_task(heartbeat_monitor(radio)),
             ])
