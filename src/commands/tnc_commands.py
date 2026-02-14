@@ -91,8 +91,8 @@ class TNCCommandHandler(CommandHandler):
         MYALIAS allows your digipeater to respond to a generic alias in addition
         to your callsign. Common aliases: WIDE1, GATE, RELAY.
 
-        When DIGIPEATER is ON, packets with MYALIAS in the path will be digipeated.
-        Supports both exact match (WIDE1) and with SSID (WIDE1-1).
+        When DIGIPEATER is ON or SELF, packets with MYALIAS in the path will be
+        digipeated. Supports both exact match (WIDE1) and with SSID (WIDE1-1).
 
         Examples:
             MYALIAS WIDE1     - Respond to WIDE1 or WIDE1-1 in path
@@ -104,7 +104,7 @@ class TNCCommandHandler(CommandHandler):
             print_pt(f"MYALIAS: {alias if alias else '(none)'}")
             if alias:
                 print_pt("")
-                print_pt("When DIGIPEATER is ON, will respond to:")
+                print_pt("When DIGIPEATER is ON or SELF, will respond to:")
                 print_pt(f"  - {self.tnc_config.get('MYCALL')} (your callsign)")
                 print_pt(f"  - {alias} (your alias)")
                 print_pt(f"  - {alias}-N (alias with any SSID)")
@@ -375,20 +375,32 @@ class TNCCommandHandler(CommandHandler):
 
     @command("DIGIPEATER", "DIGI",
              help_text="Toggle digipeater mode",
-             usage="DIGIPEATER [ON|OFF]",
+             usage="DIGIPEATER [ON|OFF|SELF]",
              category="config")
     async def digipeater(self, args):
-        """Enable or disable digipeater mode."""
+        """Enable or disable digipeater mode.
+
+        Modes:
+          ON   - Digipeat all direct packets with valid path
+          OFF  - Digipeater disabled
+          SELF - Only digipeat packets from your callsign (any SSID)
+        """
         if not args:
             current = self.tnc_config.get("DIGIPEAT") or "OFF"
             print_pt(f"DIGIPEATER: {current}")
             print_pt("")
-            print_pt("When ON, the TNC will digipeat packets with MYALIAS or MYCALL in path.")
+            print_pt("Modes:")
+            print_pt("  ON   - Digipeat all direct packets with MYALIAS or MYCALL in path")
+            print_pt("  OFF  - Digipeater disabled")
+            print_pt("  SELF - Only digipeat packets from your callsign (any SSID)")
+            print_pt("")
+            print_pt("Example: If your callsign is K1FSY-5, SELF mode will")
+            print_pt("digipeat K1FSY-9, K1FSY-1, etc., but not other stations.")
             return
 
         value = args[0].upper()
-        if value not in ("ON", "OFF"):
-            print_error("Usage: DIGIPEATER [ON|OFF]")
+        if value not in ("ON", "OFF", "SELF"):
+            print_error("Usage: DIGIPEATER [ON|OFF|SELF]")
             return
 
         self.tnc_config.set("DIGIPEAT", value)
@@ -396,7 +408,7 @@ class TNCCommandHandler(CommandHandler):
 
         # Apply to Digipeater object
         if hasattr(self.radio, 'digipeater') and self.radio.digipeater:
-            self.radio.digipeater.enabled = (value == "ON")
+            self.radio.digipeater.mode = value
 
     @command("DISPLAY",
              help_text="Display all TNC parameters",

@@ -13,18 +13,38 @@ import src.constants as constants
 class Digipeater:
     """APRS digipeater following new-paradigm WIDEn-N rules."""
 
-    def __init__(self, my_callsign: str, my_alias: str = "", enabled: bool = False):
+    def __init__(self, my_callsign: str, my_alias: str = "", mode: str = "OFF", enabled: bool = None):
         """Initialize digipeater.
 
         Args:
             my_callsign: Our callsign (e.g., "K1FSY-9")
             my_alias: Our alias (e.g., "WIDE1", "GATE", "RELAY")
-            enabled: Whether digipeating is enabled
+            mode: Digipeater mode - "ON", "OFF", or "SELF"
+                  "ON" = repeat all direct packets
+                  "OFF" = don't repeat anything
+                  "SELF" = only repeat packets from our callsign (any SSID)
+            enabled: (deprecated) Legacy boolean parameter for backward compatibility
         """
         self.my_callsign = my_callsign.upper()
         self.my_alias = my_alias.upper() if my_alias else None
-        self.enabled = enabled
+
+        # Handle legacy 'enabled' parameter for backward compatibility
+        if enabled is not None:
+            self.mode = "ON" if enabled else "OFF"
+        elif isinstance(mode, bool):
+            # Legacy: mode passed as boolean
+            self.mode = "ON" if mode else "OFF"
+        elif isinstance(mode, str):
+            self.mode = mode.upper()
+        else:
+            self.mode = "OFF"
+
         self.packets_digipeated = 0
+
+    @property
+    def enabled(self) -> bool:
+        """Backward compatibility property for enabled check."""
+        return self.mode in ("ON", "SELF")
 
     def _matches_my_calls(self, digi_call: str) -> bool:
         """Check if digipeater call matches our MYCALL or MYALIAS.
@@ -82,7 +102,7 @@ class Digipeater:
         Returns:
             True if we should digipeat
         """
-        if not self.enabled:
+        if self.mode == "OFF":
             return False
 
         # Rule 1: Only digipeat packets heard DIRECTLY (hop_count == 0)
@@ -114,6 +134,27 @@ class Digipeater:
                     level=3
                 )
             return False
+
+        # Rule 3.5: SELF mode - only digipeat packets from our base callsign (any SSID)
+        if self.mode == "SELF":
+            # Extract base callsigns (without SSID)
+            src_base = src_call.upper().split('-')[0]
+            my_base = self.my_callsign.upper().split('-')[0]
+
+            if src_base != my_base:
+                if constants.DEBUG:
+                    print_debug(
+                        f"Digipeater: Skip {src_call} - SELF mode, not our callsign (base: {src_base} != {my_base})",
+                        level=3
+                    )
+                return False
+            else:
+                if constants.DEBUG:
+                    print_debug(
+                        f"Digipeater: SELF mode - will digipeat {src_call} (matches base {my_base})",
+                        level=3
+                    )
+                # Continue to path checks below
 
         # Rule 4: Check if path contains WIDEn-N or our callsign
         has_viable_hop = False

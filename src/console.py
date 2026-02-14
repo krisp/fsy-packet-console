@@ -826,8 +826,8 @@ class TNCCompleter(Completer):
             "MONITOR": "Toggle monitor mode",
             "AUTO_ACK": "Auto-acknowledge APRS messages (ON/OFF)",
             "BEACON": "GPS beacon (ON/OFF/INTERVAL/PATH/SYMBOL/COMMENT/NOW)",
-            "DIGIPEATER": "Digipeater mode (ON/OFF/STATUS) - repeats direct packets only",
-            "DIGI": "Digipeater mode (ON/OFF/STATUS) - short alias",
+            "DIGIPEATER": "Digipeater mode (ON/OFF/SELF) - repeats direct packets",
+            "DIGI": "Digipeater mode (ON/OFF/SELF) - short alias",
             "RETRY": "Set max retry attempts (1-10)",
             "RETRY_FAST": "Fast retry timeout in seconds (5-300) for non-digipeated messages",
             "RETRY_SLOW": "Slow retry timeout in seconds (60-86400) for digipeated messages",
@@ -4290,10 +4290,12 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
         radio.shared_ax25 = shared_ax25
 
         # Create digipeater (read state from TNC config)
-        digipeat_value = tnc_config.get("DIGIPEAT") or ""
-        digipeat_enabled = digipeat_value.upper() == "ON"
+        digipeat_mode = (tnc_config.get("DIGIPEAT") or "OFF").upper()
+        # Validate mode (ON, OFF, SELF)
+        if digipeat_mode not in ("ON", "OFF", "SELF"):
+            digipeat_mode = "OFF"
         myalias = tnc_config.get("MYALIAS") or ""
-        radio.digipeater = Digipeater(mycall, my_alias=myalias, enabled=digipeat_enabled)
+        radio.digipeater = Digipeater(mycall, my_alias=myalias, mode=digipeat_mode)
 
         # ========================================================================
         # PARALLEL STARTUP: Complete all initialization
