@@ -181,13 +181,41 @@ class Digipeater:
 
         # Rule 2: Don't digipeat packets from known digipeaters
         # (prevents digipeater-to-digipeater ping-pong)
+        # EXCEPTION: SELF mode inbound allows packets FROM digipeaters if addressed TO us
         if is_source_digipeater:
-            if constants.DEBUG:
-                print_debug(
-                    f"Digipeater: Skip {src_call} - source is a digipeater",
-                    level=3
-                )
-            return False
+            # Check if SELF mode inbound (packet addressed to our callsign)
+            skip_rule2 = False
+            if self.mode == "SELF":
+                my_base = self.my_callsign.upper().split('-')[0]
+
+                # Check AX.25 destination
+                dst_base = dst_call.upper().split('-')[0]
+                is_inbound_ax25 = (dst_base == my_base and dst_call.upper() != self.my_callsign.upper())
+
+                # Check APRS message addressee
+                message_addressee = self._extract_aprs_message_addressee(info_str)
+                is_inbound_message = False
+                if message_addressee:
+                    msg_base = message_addressee.upper().split('-')[0]
+                    is_inbound_message = (msg_base == my_base and message_addressee.upper() != self.my_callsign.upper())
+
+                # Skip Rule 2 if addressed to our callsign (digipeater sending TO us is OK)
+                if is_inbound_ax25 or is_inbound_message:
+                    skip_rule2 = True
+                    if constants.DEBUG:
+                        target = message_addressee if is_inbound_message else dst_call
+                        print_debug(
+                            f"Digipeater: SELF mode - allowing {src_call} (digipeater) because addressed to {target}",
+                            level=3
+                        )
+
+            if not skip_rule2:
+                if constants.DEBUG:
+                    print_debug(
+                        f"Digipeater: Skip {src_call} - source is a digipeater",
+                        level=3
+                    )
+                return False
 
         # Rule 3: Don't digipeat our own packets (exact match including SSID)
         # Different SSIDs are different stations (K1MAL-5 != K1MAL-6)
