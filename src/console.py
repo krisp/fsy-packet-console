@@ -3555,6 +3555,7 @@ async def tnc_monitor(tnc_queue, radio):
                             # Check if we should digipeat
                             if radio.digipeater.should_digipeat(
                                 parsed_aprs['src_call'],
+                                parsed_aprs['dst_call'],
                                 parsed_aprs['hop_count'],
                                 parsed_aprs['digipeater_path'],
                                 is_source_digipeater

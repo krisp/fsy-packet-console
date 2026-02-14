@@ -46,6 +46,11 @@ class Digipeater:
         """Backward compatibility property for enabled check."""
         return self.mode in ("ON", "SELF")
 
+    @enabled.setter
+    def enabled(self, value: bool):
+        """Backward compatibility setter for enabled property."""
+        self.mode = "ON" if value else "OFF"
+
     def _matches_my_calls(self, digi_call: str) -> bool:
         """Check if digipeater call matches our MYCALL or MYALIAS.
 
@@ -87,6 +92,7 @@ class Digipeater:
     def should_digipeat(
         self,
         src_call: str,
+        dst_call: str,
         hop_count: int,
         digipeater_path: list,
         is_source_digipeater: bool
@@ -95,6 +101,7 @@ class Digipeater:
 
         Args:
             src_call: Source callsign
+            dst_call: Destination callsign
             hop_count: Number of hops (0 = direct, >0 = already digipeated)
             digipeater_path: List of digipeater callsigns in path
             is_source_digipeater: True if source is a known digipeater
@@ -106,8 +113,26 @@ class Digipeater:
             return False
 
         # Rule 1: Only digipeat packets heard DIRECTLY (hop_count == 0)
-        # Don't re-digipeat already-digipeated packets
-        if hop_count != 0:
+        # EXCEPTION: SELF mode allows any hop_count for inbound packets to our callsign
+        allow_already_digipeated = False
+        if self.mode == "SELF" and hop_count > 0:
+            # Check if this is an inbound packet to our callsign (different SSID)
+            dst_base = dst_call.upper().split('-')[0]
+            my_base = self.my_callsign.upper().split('-')[0]
+            src_base = src_call.upper().split('-')[0]
+
+            # Inbound: destination is our base, but not our exact SSID, and not from us
+            if dst_base == my_base and dst_call.upper() != self.my_callsign.upper() and src_base != my_base:
+                # Check we're not already in path (loop prevention)
+                if not any(my_base in hop.rstrip('*').upper() for hop in digipeater_path):
+                    allow_already_digipeated = True
+                    if constants.DEBUG:
+                        print_debug(
+                            f"Digipeater: SELF courtesy relay - inbound to {dst_call} (hop_count={hop_count})",
+                            level=3
+                        )
+
+        if hop_count != 0 and not allow_already_digipeated:
             if constants.DEBUG:
                 print_debug(
                     f"Digipeater: Skip {src_call} - already digipeated (hop_count={hop_count})",
@@ -135,28 +160,50 @@ class Digipeater:
                 )
             return False
 
-        # Rule 3.5: SELF mode - only digipeat packets from our base callsign (any SSID)
+        # Rule 3.5: SELF mode - only digipeat packets from/to our base callsign (any SSID)
         if self.mode == "SELF":
             # Extract base callsigns (without SSID)
             src_base = src_call.upper().split('-')[0]
             my_base = self.my_callsign.upper().split('-')[0]
+            dst_base = dst_call.upper().split('-')[0]
 
-            if src_base != my_base:
+            # Check if packet involves our callsign (outbound OR inbound)
+            is_outbound = (src_base == my_base and hop_count == 0)  # FROM our callsign, direct only
+            is_inbound = (dst_base == my_base and dst_call.upper() != self.my_callsign.upper() and
+                          src_base != my_base)  # TO our callsign (different SSID), any hop_count
+
+            if not is_outbound and not is_inbound:
                 if constants.DEBUG:
                     print_debug(
-                        f"Digipeater: Skip {src_call} - SELF mode, not our callsign (base: {src_base} != {my_base})",
+                        f"Digipeater: Skip {src_call} - SELF mode, not our callsign (src: {src_base}, dst: {dst_base} != {my_base})",
                         level=3
                     )
                 return False
-            else:
-                if constants.DEBUG:
-                    print_debug(
-                        f"Digipeater: SELF mode - will digipeat {src_call} (matches base {my_base})",
-                        level=3
-                    )
-                # Continue to path checks below
+
+            if is_outbound and constants.DEBUG:
+                print_debug(
+                    f"Digipeater: SELF mode outbound - will digipeat {src_call} (matches base {my_base})",
+                    level=3
+                )
+            if is_inbound and hop_count == 0 and constants.DEBUG:
+                print_debug(
+                    f"Digipeater: SELF mode inbound - will digipeat for {dst_call} (direct packet)",
+                    level=3
+                )
+            # Continue to path checks below
 
         # Rule 4: Check if path contains WIDEn-N or our callsign
+        # EXCEPTION: SELF mode inbound doesn't require viable hop (last mile delivery)
+        if self.mode == "SELF":
+            dst_base = dst_call.upper().split('-')[0]
+            my_base = self.my_callsign.upper().split('-')[0]
+            src_base = src_call.upper().split('-')[0]
+
+            # If this is inbound to our callsign, skip viable hop check
+            if dst_base == my_base and dst_call.upper() != self.my_callsign.upper() and src_base != my_base:
+                return True  # Allow regardless of path state
+
+        # For all other cases, check for viable hop
         has_viable_hop = False
         for digi in digipeater_path:
             # Remove asterisk if present
@@ -186,11 +233,12 @@ class Digipeater:
 
         return True
 
-    def process_path(self, digipeater_path: list) -> tuple:
+    def process_path(self, digipeater_path: list, courtesy_relay: bool = False) -> tuple:
         """Process digipeater path according to new-paradigm rules.
 
         Args:
             digipeater_path: Original digipeater path
+            courtesy_relay: If True, insert our callsign without consuming WIDE2 (SELF mode inbound)
 
         Returns:
             Tuple of (new_path, used_alias) where:
@@ -200,6 +248,35 @@ class Digipeater:
         new_path = []
         used_alias = None
         filled = False
+
+        # SELF mode courtesy relay - insert ourselves (preserve WIDE if present, or append if exhausted)
+        if courtesy_relay:
+            # Find position: after last * (digipeated) hop, before first unconsumed hop
+            # If all hops are consumed (*), append at end
+            insert_pos = 0
+            found_unconsumed = False
+
+            for i, hop in enumerate(digipeater_path):
+                if hop.endswith('*'):
+                    insert_pos = i + 1
+                else:
+                    # Found first unconsumed hop, insert before it
+                    found_unconsumed = True
+                    break
+
+            # If no unconsumed hops found, insert_pos is already at the end
+            if not found_unconsumed:
+                insert_pos = len(digipeater_path)
+
+            # Build new path: insert ourselves at the determined position
+            new_path = (
+                digipeater_path[:insert_pos] +
+                [f"{self.my_callsign}*"] +
+                digipeater_path[insert_pos:]
+            )
+            used_alias = "Courtesy"  # Special marker for courtesy relay
+
+            return new_path, used_alias
 
         for digi in digipeater_path:
             # Skip already-used hops (marked with *)
@@ -249,15 +326,19 @@ class Digipeater:
         """Extract path type from the used alias.
 
         Args:
-            used_alias: The alias we filled (e.g., "WIDE1-1", "WIDE2-2", "K1FSY-9")
+            used_alias: The alias we filled (e.g., "WIDE1-1", "WIDE2-2", "K1FSY-9", "Courtesy")
 
         Returns:
-            Path type: "WIDE1-1", "WIDE2-2", "WIDE2-1", "Direct", or "Other"
+            Path type: "WIDE1-1", "WIDE2-2", "WIDE2-1", "Direct", "Courtesy", or "Other"
         """
         if not used_alias:
             return "Other"
 
         alias_upper = used_alias.upper().rstrip('*')
+
+        # Check for courtesy relay marker
+        if alias_upper == "COURTESY":
+            return "Courtesy"
 
         # Check for WIDEn-N patterns
         if alias_upper.startswith('WIDE') and '-' in alias_upper:
@@ -279,7 +360,7 @@ class Digipeater:
         Returns:
             Tuple of (new_frame, path_type) where:
                 new_frame: New KISS frame with updated path, or None if processing failed
-                path_type: Path type used ("WIDE1-1", "WIDE2-2", "Direct", etc.)
+                path_type: Path type used ("WIDE1-1", "WIDE2-2", "Direct", "Courtesy", etc.)
         """
         try:
             # Extract components
@@ -288,8 +369,22 @@ class Digipeater:
             info_str = aprs_data['info_str']
             original_path = aprs_data['digipeater_path']
 
+            # Determine if this is a courtesy relay (SELF mode inbound with hop_count > 0)
+            courtesy_relay = False
+            hop_count = aprs_data.get('hop_count', 0)
+
+            if self.mode == "SELF" and hop_count > 0:
+                dst_base = dst_call.upper().split('-')[0]
+                my_base = self.my_callsign.upper().split('-')[0]
+                src_base = src_call.upper().split('-')[0]
+
+                # Courtesy relay if: destination is our base (different SSID), source is not ours, already digipeated
+                # No WIDE requirement - we handle both preserved and exhausted paths
+                if dst_base == my_base and dst_call.upper() != self.my_callsign.upper() and src_base != my_base:
+                    courtesy_relay = True
+
             # Process the path
-            new_path, used_alias = self.process_path(original_path)
+            new_path, used_alias = self.process_path(original_path, courtesy_relay=courtesy_relay)
 
             if used_alias is None:
                 # Couldn't fill any hop - shouldn't happen if should_digipeat() returned True
