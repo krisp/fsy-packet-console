@@ -95,31 +95,55 @@
                 </div>
             </div>
 
-            <!-- Section C: Top 10 Stations Chart -->
+            <!-- Section C: Top 10 Stations Chart (Client) -->
             <div class="dashboard-section">
-                <h3>Top 10 Digipeaters</h3>
+                <h3>Most Relayed Stations (Client)</h3>
                 <div id="top-stations-container" class="chart-container">
                     <canvas id="topStationsChart"></canvas>
                 </div>
             </div>
 
-            <!-- Section D: Path Usage Chart -->
+            <!-- Section D: Top 10 Network Digipeaters Chart -->
             <div class="dashboard-section">
-                <h3>Path Usage Distribution</h3>
+                <h3>Top 10 Digipeaters in Area (Network)</h3>
+                <div id="network-digipeaters-container" class="chart-container">
+                    <canvas id="networkDigipeatersChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Section E: Path Usage Chart (Client) -->
+            <div class="dashboard-section">
+                <h3>Path Usage Distribution (Client)</h3>
                 <div id="path-usage-container" class="chart-container">
                     <canvas id="pathUsageChart"></canvas>
                 </div>
             </div>
 
-            <!-- Section E: Time-of-Day Heatmap -->
+            <!-- Section F: Network-Wide Path Usage Chart -->
             <div class="dashboard-section">
-                <h3>Activity Heatmap (Hour of Day)</h3>
+                <h3>Network-Wide Path Usage</h3>
+                <div id="network-path-usage-container" class="chart-container">
+                    <canvas id="networkPathUsageChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Section G: Client Activity Heatmap -->
+            <div class="dashboard-section">
+                <h3>Client Activity Heatmap (Hour of Day)</h3>
                 <div id="heatmap-container" class="chart-container">
                     <canvas id="activityHeatmap"></canvas>
                 </div>
             </div>
 
-            <!-- Section F: Recent Activity Feed -->
+            <!-- Section H: Network Activity Heatmap -->
+            <div class="dashboard-section">
+                <h3>Network Activity Heatmap (Hour of Day)</h3>
+                <div id="network-heatmap-container" class="chart-container">
+                    <canvas id="networkActivityHeatmap"></canvas>
+                </div>
+            </div>
+
+            <!-- Section I: Recent Activity Feed -->
             <div class="dashboard-section">
                 <h3>Recent Activity Feed</h3>
                 <div id="activityFeed" class="activity-feed">
@@ -127,7 +151,7 @@
                 </div>
             </div>
 
-            <!-- Section G: Coverage Map -->
+            <!-- Section J: Coverage Map -->
             <div class="dashboard-section">
                 <h3>Coverage Map</h3>
                 <div id="coverage-map-container" class="map-container">
@@ -135,9 +159,9 @@
                 </div>
             </div>
 
-            <!-- Section H: Top Digipeaters Table -->
+            <!-- Section K: Client Stations Table -->
             <div class="dashboard-section">
-                <h3>Top Digipeaters Details</h3>
+                <h3>Digipeated Stations Detail (Client)</h3>
                 <div class="table-wrapper">
                     <table id="top-digipeaters-table" class="data-table">
                         <thead>
@@ -171,6 +195,44 @@
                         <tbody id="digipeaters-tbody">
                             <tr class="loading-row">
                                 <td colspan="6" class="loading-cell">Loading digipeaters...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Section L: Network Digipeaters Table -->
+            <div class="dashboard-section">
+                <h3>Network Digipeaters</h3>
+                <div class="table-wrapper">
+                    <table id="network-digipeaters-table" class="data-table">
+                        <thead>
+                            <tr>
+                                <th data-sort="rank" class="sortable sorted-asc">
+                                    Rank
+                                    <span class="sort-indicator">▲</span>
+                                </th>
+                                <th data-sort="callsign" class="sortable">
+                                    Callsign
+                                    <span class="sort-indicator"></span>
+                                </th>
+                                <th data-sort="packets" class="sortable">
+                                    Packets Relayed
+                                    <span class="sort-indicator"></span>
+                                </th>
+                                <th data-sort="stations" class="sortable">
+                                    Unique Stations
+                                    <span class="sort-indicator"></span>
+                                </th>
+                                <th data-sort="last-heard" class="sortable">
+                                    Last Heard
+                                    <span class="sort-indicator"></span>
+                                </th>
+                            </tr>
+                        </thead>
+                        <tbody id="network-digipeaters-tbody">
+                            <tr class="loading-row">
+                                <td colspan="5" class="loading-cell">Loading network digipeaters...</td>
                             </tr>
                         </tbody>
                     </table>

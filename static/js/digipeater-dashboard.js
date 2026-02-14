@@ -24,7 +24,10 @@ export class DigipeaterDashboard {
             hourly: null,
             topStations: null,
             pathUsage: null,
-            heatmap: null
+            heatmap: null,
+            networkDigipeaters: null,
+            networkPathUsage: null,
+            networkHeatmap: null
         };
 
         // Current data
@@ -33,7 +36,10 @@ export class DigipeaterDashboard {
             activity: null,
             topStations: null,
             pathUsage: null,
-            heatmap: null
+            heatmap: null,
+            networkDigipeaters: null,
+            networkPathUsage: null,
+            networkHeatmap: null
         };
 
         // SSE connection
@@ -93,13 +99,16 @@ export class DigipeaterDashboard {
         console.log(`Loading dashboard data for range: ${this.currentRange}`);
 
         try {
-            // Fetch all endpoints in parallel
-            const [stats, activity, topStations, pathUsage, heatmap] = await Promise.all([
+            // Fetch all endpoints in parallel (client + network)
+            const [stats, activity, topStations, pathUsage, heatmap, networkDigipeaters, networkPathUsage, networkHeatmap] = await Promise.all([
                 this.fetchDigipeaterStats(this.currentRange),
                 this.fetchDigipeaterActivity(this.currentRange),
                 this.fetchDigipeaterTopStations(this.currentRange),
                 this.fetchDigipeaterPathUsage(this.currentRange),
-                this.fetchDigipeaterHeatmap(this.currentRange)
+                this.fetchDigipeaterHeatmap(this.currentRange),
+                this.fetchNetworkDigipeaters(this.currentRange),
+                this.fetchNetworkPathUsage(this.currentRange),
+                this.fetchNetworkHeatmap(this.currentRange)
             ]);
 
             // Store data
@@ -108,6 +117,9 @@ export class DigipeaterDashboard {
             this.data.topStations = topStations;
             this.data.pathUsage = pathUsage;
             this.data.heatmap = heatmap;
+            this.data.networkDigipeaters = networkDigipeaters;
+            this.data.networkPathUsage = networkPathUsage;
+            this.data.networkHeatmap = networkHeatmap;
 
             // Update UI
             this.updateStatsCards(stats);
@@ -201,6 +213,69 @@ export class DigipeaterDashboard {
     }
 
     /**
+     * Fetch network digipeaters from API
+     */
+    async fetchNetworkDigipeaters(range) {
+        try {
+            const hours = this.rangeToHours(range);
+            const url = hours ? `/api/digipeater/network?hours=${hours}&limit=10` : '/api/digipeater/network?limit=10';
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            return await response.json();
+        } catch (error) {
+            console.error('Failed to fetch network digipeaters:', error);
+            return { digipeaters: [] };
+        }
+    }
+
+    /**
+     * Fetch network path usage from API
+     */
+    async fetchNetworkPathUsage(range) {
+        try {
+            const hours = this.rangeToHours(range);
+            const url = hours ? `/api/digipeater/network/path-usage?hours=${hours}` : '/api/digipeater/network/path-usage';
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            return await response.json();
+        } catch (error) {
+            console.error('Failed to fetch network path usage:', error);
+            return { path_usage: {} };
+        }
+    }
+
+    /**
+     * Fetch network heatmap from API
+     */
+    async fetchNetworkHeatmap(range) {
+        try {
+            const days = range.endsWith('d') ? parseInt(range) : 7;
+            const response = await fetch(`/api/digipeater/network/heatmap?days=${days}`);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            return await response.json();
+        } catch (error) {
+            console.error('Failed to fetch network heatmap:', error);
+            return { heatmap: [] };
+        }
+    }
+
+    /**
+     * Convert time range to hours
+     */
+    rangeToHours(range) {
+        if (range === 'all') return null;
+        if (range.endsWith('h')) return parseInt(range);
+        if (range.endsWith('d')) return parseInt(range) * 24;
+        return 24;
+    }
+
+    /**
      * Create all charts
      */
     createCharts() {
@@ -231,7 +306,7 @@ export class DigipeaterDashboard {
             );
         }
 
-        // Activity heatmap
+        // Activity heatmap (client)
         if (this.data.heatmap && this.data.heatmap.grid) {
             this.charts.heatmap = renderActivityHeatmap(
                 'activityHeatmap',
@@ -239,10 +314,44 @@ export class DigipeaterDashboard {
             );
         }
 
+        // Network digipeaters chart
+        if (this.data.networkDigipeaters && this.data.networkDigipeaters.digipeaters) {
+            this.charts.networkDigipeaters = createTopStationsChart(
+                'networkDigipeatersChart',
+                this.data.networkDigipeaters.digipeaters.map(d => ({
+                    callsign: d.callsign,
+                    count: d.packets_relayed
+                })),
+                (callsign) => this.handleStationClick(callsign)
+            );
+        }
+
+        // Network path usage chart
+        if (this.data.networkPathUsage && this.data.networkPathUsage.path_usage) {
+            // Transform network data format {path: {count: N}} to {path: N}
+            const pathUsageData = {};
+            for (const [pathType, stats] of Object.entries(this.data.networkPathUsage.path_usage)) {
+                pathUsageData[pathType] = stats.count;
+            }
+            this.charts.networkPathUsage = createPathUsageChart(
+                'networkPathUsageChart',
+                pathUsageData
+            );
+        }
+
+        // Network activity heatmap
+        if (this.data.networkHeatmap && this.data.networkHeatmap.heatmap) {
+            this.charts.networkHeatmap = renderActivityHeatmap(
+                'networkActivityHeatmap',
+                this.data.networkHeatmap.heatmap
+            );
+        }
+
         console.log('Charts created successfully');
 
-        // Populate the top digipeaters table
+        // Populate tables
         this.updateTopDigipeatersTable();
+        this.updateNetworkDigipeatersTable();
     }
 
     /**
@@ -279,6 +388,41 @@ export class DigipeaterDashboard {
                     <td>${percentage}%</td>
                     <td>${lastHeard}</td>
                     <td>${frequency}</td>
+                </tr>
+            `;
+        });
+
+        tbody.innerHTML = html;
+    }
+
+    /**
+     * Update the network digipeaters table
+     */
+    updateNetworkDigipeatersTable() {
+        const tbody = document.getElementById('network-digipeaters-tbody');
+        if (!tbody || !this.data.networkDigipeaters || !this.data.networkDigipeaters.digipeaters) {
+            return;
+        }
+
+        const digipeaters = this.data.networkDigipeaters.digipeaters;
+        if (digipeaters.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" class="loading-cell">No network digipeaters found</td></tr>';
+            return;
+        }
+
+        // Build table rows
+        let html = '';
+        digipeaters.forEach((digi, index) => {
+            const rank = index + 1;
+            const lastHeard = new Date(digi.last_heard).toLocaleString();
+
+            html += `
+                <tr>
+                    <td>${rank}</td>
+                    <td class="callsign-cell">${digi.callsign}</td>
+                    <td>${digi.packets_relayed}</td>
+                    <td>${digi.unique_stations}</td>
+                    <td>${lastHeard}</td>
                 </tr>
             `;
         });

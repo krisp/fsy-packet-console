@@ -3565,6 +3565,202 @@ class APRSManager:
 
         return result
 
+    def get_network_path_usage(
+        self, hours: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Get network-wide path usage statistics from ReceptionEvents.
+
+        Scans all stations' reception events to count how different path types
+        are being used across the network (not just this digipeater).
+
+        Args:
+            hours: Only include receptions from last N hours (None = all time)
+
+        Returns:
+            Dictionary with path usage statistics:
+            {
+                "path_usage": {
+                    "WIDE1-1": {"count": 150, "percentage": 45.5, "stations": 25},
+                    "WIDE2-2": {"count": 100, "percentage": 30.3, "stations": 18},
+                    ...
+                },
+                "total_packets": 330
+            }
+        """
+        from datetime import timedelta
+
+        # Calculate cutoff time
+        cutoff_time = None
+        if hours is not None:
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+        # Track path usage
+        path_counts = {}  # path_type -> count
+        path_stations = {}  # path_type -> set of station callsigns
+        total_packets = 0
+
+        # Scan all stations' receptions
+        for station in self.stations.values():
+            for reception in station.receptions:
+                # Skip if outside time window
+                if cutoff_time and reception.timestamp < cutoff_time:
+                    continue
+
+                # Skip if not RF
+                if not reception.direct_rf:
+                    continue
+
+                # Skip if no digipeater path
+                if not reception.digipeater_path:
+                    continue
+
+                # Classify the path type
+                path_type = self._classify_path_type(reception.digipeater_path)
+
+                # Count it
+                if path_type not in path_counts:
+                    path_counts[path_type] = 0
+                    path_stations[path_type] = set()
+
+                path_counts[path_type] += 1
+                path_stations[path_type].add(station.callsign)
+                total_packets += 1
+
+        # Build result with percentages
+        path_usage = {}
+        for path_type, count in path_counts.items():
+            percentage = (count / total_packets * 100) if total_packets > 0 else 0
+            path_usage[path_type] = {
+                'count': count,
+                'percentage': round(percentage, 1),
+                'stations': len(path_stations[path_type])
+            }
+
+        return {
+            'path_usage': path_usage,
+            'total_packets': total_packets
+        }
+
+    def _classify_path_type(self, digipeater_path: List[str]) -> str:
+        """Classify a digipeater path by extracting alias patterns (WIDE/RELAY/TRACE).
+
+        Strips out specific digipeater callsigns and only reports the aliases
+        that were requested, which is what matters for understanding network usage.
+
+        Args:
+            digipeater_path: List of digipeater hops (e.g., ["N0ABC*", "WIDE2-1"])
+
+        Returns:
+            Alias pattern for grouping (e.g., "WIDE1-1", "WIDE2-2", etc.)
+        """
+        if not digipeater_path:
+            return "Direct"
+
+        # Extract only aliases (WIDE, RELAY, TRACE, etc.)
+        # Ignore specific digipeater callsigns
+        aliases = []
+        for hop in digipeater_path:
+            hop_clean = hop.rstrip('*').upper()
+
+            # Check if this is an alias (starts with known alias prefixes)
+            # Common aliases: WIDE, RELAY, TRACE, TEMP, LOCAL
+            if hop_clean.startswith(('WIDE', 'RELAY', 'TRACE', 'TEMP', 'LOCAL')):
+                aliases.append(hop_clean)
+            # Ignore specific callsigns (e.g., "N0ABC-1", "W1XYZ-15")
+
+        # If we found aliases, report them
+        if aliases:
+            # For single alias, return as-is
+            if len(aliases) == 1:
+                return aliases[0]
+            # For multiple aliases, show the path
+            elif len(aliases) <= 3:
+                return ','.join(aliases)
+            else:
+                # Very unusual - show first 2 plus count
+                return f"{aliases[0]},{aliases[1]}+{len(aliases)-2}"
+
+        # If no aliases found (only specific digipeater callsigns)
+        return "Via Digipeater"
+
+    def get_network_heatmap(
+        self, days: int = 7
+    ) -> Dict[str, Any]:
+        """Get network-wide time-of-day activity heatmap from ReceptionEvents.
+
+        Scans all stations' reception events to build a 7x24 grid showing
+        activity patterns across the network by day of week and hour of day.
+
+        Args:
+            days: Number of days to analyze (default: 7)
+
+        Returns:
+            Dictionary with heatmap data:
+            {
+                "heatmap": [
+                    [0, 0, 0, 1, 2, 3, ...],  # Sunday (24 hours)
+                    [0, 1, 1, 2, 3, 4, ...],  # Monday
+                    ...                        # ... through Saturday
+                ],
+                "peak_hour": 15,
+                "peak_day": 4,  # Thursday
+                "total_packets": 1250,
+                "days_analyzed": 7
+            }
+        """
+        from datetime import timedelta
+
+        # Calculate cutoff time
+        cutoff_time = datetime.now(timezone.utc) - timedelta(days=days)
+
+        # Initialize 7x24 grid (day of week × hour of day)
+        heatmap = [[0 for _ in range(24)] for _ in range(7)]
+        total_packets = 0
+
+        # Scan all stations' receptions
+        for station in self.stations.values():
+            for reception in station.receptions:
+                # Skip if outside time window
+                if reception.timestamp < cutoff_time:
+                    continue
+
+                # Skip if not RF
+                if not reception.direct_rf:
+                    continue
+
+                # Skip if no digipeater path (direct packets only, or digipeated)
+                # Actually, let's count ALL RF packets, not just digipeated ones
+                # This gives a better picture of network activity
+
+                # Extract day of week (0=Monday, 6=Sunday in Python)
+                # Convert to (0=Sunday, 6=Saturday) for consistency
+                day_of_week = (reception.timestamp.weekday() + 1) % 7
+                hour_of_day = reception.timestamp.hour
+
+                # Increment the grid
+                heatmap[day_of_week][hour_of_day] += 1
+                total_packets += 1
+
+        # Find peak hour and day
+        peak_count = 0
+        peak_hour = 0
+        peak_day = 0
+
+        for day in range(7):
+            for hour in range(24):
+                if heatmap[day][hour] > peak_count:
+                    peak_count = heatmap[day][hour]
+                    peak_day = day
+                    peak_hour = hour
+
+        return {
+            'heatmap': heatmap,
+            'peak_hour': peak_hour,
+            'peak_day': peak_day,
+            'total_packets': total_packets,
+            'days_analyzed': days
+        }
+
     def get_digipeater_coverage(self) -> Dict[str, Dict]:
         """Get digipeater coverage data for mapping.
 

@@ -83,7 +83,7 @@ export function createHourlyActivityChart(canvasId, data) {
                     display: true,
                     position: 'top',
                     labels: {
-                        color: '#888',
+                        color: '#fff',
                         font: {
                             size: 12
                         }
@@ -108,7 +108,7 @@ export function createHourlyActivityChart(canvasId, data) {
             scales: {
                 x: {
                     ticks: {
-                        color: '#888',
+                        color: '#fff',
                         maxRotation: 45,
                         minRotation: 45
                     },
@@ -123,10 +123,10 @@ export function createHourlyActivityChart(canvasId, data) {
                     title: {
                         display: true,
                         text: 'Packets',
-                        color: '#888'
+                        color: '#fff'
                     },
                     ticks: {
-                        color: '#888',
+                        color: '#fff',
                         precision: 0
                     },
                     grid: {
@@ -140,10 +140,10 @@ export function createHourlyActivityChart(canvasId, data) {
                     title: {
                         display: true,
                         text: 'Stations',
-                        color: '#888'
+                        color: '#fff'
                     },
                     ticks: {
-                        color: '#888',
+                        color: '#fff',
                         precision: 0
                     },
                     grid: {
@@ -218,7 +218,7 @@ export function createTopStationsChart(canvasId, data, onStationClick = null) {
                 x: {
                     beginAtZero: true,
                     ticks: {
-                        color: '#888',
+                        color: '#fff',
                         precision: 0
                     },
                     grid: {
@@ -227,12 +227,12 @@ export function createTopStationsChart(canvasId, data, onStationClick = null) {
                     title: {
                         display: true,
                         text: 'Packet Count',
-                        color: '#888'
+                        color: '#fff'
                     }
                 },
                 y: {
                     ticks: {
-                        color: '#888'
+                        color: '#fff'
                     },
                     grid: {
                         color: '#333'
@@ -304,7 +304,7 @@ export function createPathUsageChart(canvasId, data) {
                     display: true,
                     position: 'right',
                     labels: {
-                        color: '#888',
+                        color: '#fff',
                         font: {
                             size: 12
                         },
@@ -318,6 +318,8 @@ export function createPathUsageChart(canvasId, data) {
                                 return {
                                     text: `${label}: ${value} (${percent}%)`,
                                     fillStyle: data.datasets[0].backgroundColor[i],
+                                    fontColor: '#fff',  // Chart.js v2
+                                    color: '#fff',      // Chart.js v3+
                                     hidden: false,
                                     index: i
                                 };
@@ -415,7 +417,7 @@ export function renderActivityHeatmap(canvasId, data) {
     }
 
     // Draw labels (hours on top, days on left)
-    ctx.fillStyle = '#888';
+    ctx.fillStyle = '#fff';
     ctx.font = '11px sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'bottom';

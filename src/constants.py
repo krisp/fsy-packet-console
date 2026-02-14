@@ -1,7 +1,7 @@
 """Constants and configuration for the radio console."""
 
 # --- Version ---
-VERSION = "0.9.1"
+VERSION = "0.9.2"
 
 # --- Configuration ---
 TNC_TCP_PORT = 8001

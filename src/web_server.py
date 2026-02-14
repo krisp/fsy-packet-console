@@ -117,6 +117,8 @@ class WebServer:
             self.app.router.add_get('/api/digipeater/path-usage', api_handlers.get_digipeater_path_usage)
             self.app.router.add_get('/api/digipeater/heatmap', api_handlers.get_digipeater_heatmap)
             self.app.router.add_get('/api/digipeater/network', api_handlers.get_network_digipeater_stats)
+            self.app.router.add_get('/api/digipeater/network/path-usage', api_handlers.get_network_path_usage)
+            self.app.router.add_get('/api/digipeater/network/heatmap', api_handlers.get_network_heatmap)
 
             # POST routes (require authentication via WEBUI_PASSWORD)
             self.app.router.add_post('/api/messages', api_handlers.handle_send_message)

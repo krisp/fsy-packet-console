@@ -874,6 +874,68 @@ class APIHandlers:
             "returned_count": len(limited_stats)
         })
 
+    async def get_network_path_usage(
+        self, request: web.Request
+    ) -> web.Response:
+        """GET /api/digipeater/network/path-usage - Get network-wide path usage stats.
+
+        Computes path type usage across ALL stations in the network by
+        scanning ReceptionEvents. This shows what paths are being used
+        network-wide, not just by this digipeater.
+
+        Query params:
+            hours: Only include last N hours (default: all time)
+
+        Returns:
+            {
+                "path_usage": {
+                    "WIDE1-1": {"count": 150, "percentage": 45.5, "stations": 25},
+                    "WIDE2-2": {"count": 100, "percentage": 30.3, "stations": 18},
+                    ...
+                },
+                "total_packets": 330
+            }
+        """
+        hours_param = request.query.get('hours')
+        hours = int(hours_param) if hours_param else None
+
+        # Get network-wide path usage from APRSManager
+        path_usage = self.aprs.get_network_path_usage(hours=hours)
+
+        return web.json_response(path_usage)
+
+    async def get_network_heatmap(
+        self, request: web.Request
+    ) -> web.Response:
+        """GET /api/digipeater/network/heatmap - Get network-wide activity heatmap.
+
+        Computes time-of-day activity patterns across ALL stations in the network by
+        scanning ReceptionEvents. This shows when the network is most active.
+
+        Query params:
+            days: Number of days to analyze (default: 7)
+
+        Returns:
+            {
+                "heatmap": [
+                    [0, 0, 0, 1, 2, 3, ...],  # Sunday (24 hours)
+                    [0, 1, 1, 2, 3, 4, ...],  # Monday
+                    ...
+                ],
+                "peak_hour": 15,
+                "peak_day": 4,
+                "total_packets": 1250,
+                "days_analyzed": 7
+            }
+        """
+        days_param = request.query.get('days', '7')
+        days = int(days_param)
+
+        # Get network-wide heatmap from APRSManager
+        heatmap = self.aprs.get_network_heatmap(days=days)
+
+        return web.json_response(heatmap)
+
     async def handle_update_beacon_comment(self, request: web.Request) -> web.Response:
         """POST /api/beacon/comment - Update beacon comment (requires password).
 
