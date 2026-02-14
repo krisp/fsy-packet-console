@@ -3242,8 +3242,8 @@ def parse_and_track_aprs_frame(complete_frame, radio, timestamp=None, frame_numb
             # Trace callsigns appear AFTER unused aliases (bad iGate behavior)
             # Keep all unused WIDE/RELAY aliases, but truncate at first non-alias after them
             if constants.DEBUG and filtered_path:
-                print_debug(f"TRACE: raw_path={raw_path}", level=2)
-                print_debug(f"TRACE: filtered_path (after Q-filter)={filtered_path}", level=2)
+                print_debug(f"TRACE: raw_path={raw_path}", level=6)
+                print_debug(f"TRACE: filtered_path (after Q-filter)={filtered_path}", level=6)
             final_path = []
             seen_unused_alias = False
             for i, digi in enumerate(filtered_path):
@@ -3253,23 +3253,23 @@ def parse_and_track_aprs_frame(complete_frame, radio, timestamp=None, frame_numb
                     (digi_upper.startswith('WIDE') or digi_upper.startswith('RELAY'))
                 )
                 if constants.DEBUG and filtered_path:
-                    print_debug(f"TRACE: loop i={i} digi={digi} is_unused_alias={is_unused_alias} seen={seen_unused_alias}", level=2)
+                    print_debug(f"TRACE: loop i={i} digi={digi} is_unused_alias={is_unused_alias} seen={seen_unused_alias}", level=6)
                 if is_unused_alias:
                     # Keep unused aliases (WIDE1-1, WIDE2-1, etc.)
                     final_path.append(digi)
                     seen_unused_alias = True
                     if constants.DEBUG:
-                        print_debug(f"TRACE:   -> appended {digi}, final_path={final_path}", level=2)
+                        print_debug(f"TRACE:   -> appended {digi}, final_path={final_path}", level=6)
                 elif seen_unused_alias:
                     # Non-alias callsign after unused alias = iGate trace, truncate here
                     if constants.DEBUG:
-                        print_debug(f"TRACE:   -> breaking at {digi} (trace after unused alias)", level=2)
+                        print_debug(f"TRACE:   -> breaking at {digi} (trace after unused alias)", level=6)
                     break
                 else:
                     # Used digi (has *) or callsign before any unused alias
                     final_path.append(digi)
                     if constants.DEBUG:
-                        print_debug(f"TRACE:   -> appended {digi} (used digi), final_path={final_path}", level=2)
+                        print_debug(f"TRACE:   -> appended {digi} (used digi), final_path={final_path}", level=6)
 
             result['digipeater_path'] = final_path
 
@@ -3558,7 +3558,8 @@ async def tnc_monitor(tnc_queue, radio):
                                 parsed_aprs['dst_call'],
                                 parsed_aprs['hop_count'],
                                 parsed_aprs['digipeater_path'],
-                                is_source_digipeater
+                                is_source_digipeater,
+                                parsed_aprs.get('info_str', '')
                             ):
                                 # Create digipeated frame
                                 digi_frame, path_type = radio.digipeater.digipeat_frame(complete_frame, parsed_aprs)

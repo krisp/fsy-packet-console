@@ -89,22 +89,50 @@ class Digipeater:
 
         return False
 
+    def _extract_aprs_message_addressee(self, info_str: str) -> str:
+        """Extract APRS message addressee from info field.
+
+        Args:
+            info_str: APRS info field
+
+        Returns:
+            Addressee callsign if this is a message, empty string otherwise
+        """
+        if not info_str or not info_str.startswith(':'):
+            return ""
+
+        # APRS message format: :ADDRESSEE:message text
+        # ADDRESSEE is padded to 9 characters
+        try:
+            # Extract addressee (between first : and second :)
+            parts = info_str[1:].split(':', 1)
+            if len(parts) >= 1:
+                # Strip whitespace padding
+                addressee = parts[0].strip()
+                return addressee
+        except Exception:
+            pass
+
+        return ""
+
     def should_digipeat(
         self,
         src_call: str,
         dst_call: str,
         hop_count: int,
         digipeater_path: list,
-        is_source_digipeater: bool
+        is_source_digipeater: bool,
+        info_str: str = ""
     ) -> bool:
         """Check if we should digipeat this packet.
 
         Args:
             src_call: Source callsign
-            dst_call: Destination callsign
+            dst_call: Destination callsign (AX.25 address)
             hop_count: Number of hops (0 = direct, >0 = already digipeated)
             digipeater_path: List of digipeater callsigns in path
             is_source_digipeater: True if source is a known digipeater
+            info_str: APRS info field (for message addressee extraction)
 
         Returns:
             True if we should digipeat
@@ -117,18 +145,29 @@ class Digipeater:
         allow_already_digipeated = False
         if self.mode == "SELF" and hop_count > 0:
             # Check if this is an inbound packet to our callsign (different SSID)
-            dst_base = dst_call.upper().split('-')[0]
             my_base = self.my_callsign.upper().split('-')[0]
             src_base = src_call.upper().split('-')[0]
 
-            # Inbound: destination is our base, but not our exact SSID, and not from us
-            if dst_base == my_base and dst_call.upper() != self.my_callsign.upper() and src_base != my_base:
+            # Check both AX.25 destination and APRS message addressee
+            dst_base = dst_call.upper().split('-')[0]
+            is_ax25_match = (dst_base == my_base and dst_call.upper() != self.my_callsign.upper())
+
+            # For APRS messages, also check addressee in info field
+            message_addressee = self._extract_aprs_message_addressee(info_str)
+            is_message_match = False
+            if message_addressee:
+                msg_base = message_addressee.upper().split('-')[0]
+                is_message_match = (msg_base == my_base and message_addressee.upper() != self.my_callsign.upper())
+
+            # Inbound if either AX.25 destination or message addressee matches our base (not exact SSID), and not from us
+            if (is_ax25_match or is_message_match) and src_base != my_base:
                 # Check we're not already in path (loop prevention)
                 if not any(my_base in hop.rstrip('*').upper() for hop in digipeater_path):
                     allow_already_digipeated = True
                     if constants.DEBUG:
+                        target = message_addressee if is_message_match else dst_call
                         print_debug(
-                            f"Digipeater: SELF courtesy relay - inbound to {dst_call} (hop_count={hop_count})",
+                            f"Digipeater: SELF courtesy relay - inbound to {target} (hop_count={hop_count})",
                             level=3
                         )
 
@@ -169,8 +208,20 @@ class Digipeater:
 
             # Check if packet involves our callsign (outbound OR inbound)
             is_outbound = (src_base == my_base and hop_count == 0)  # FROM our callsign, direct only
-            is_inbound = (dst_base == my_base and dst_call.upper() != self.my_callsign.upper() and
-                          src_base != my_base)  # TO our callsign (different SSID), any hop_count
+
+            # Check AX.25 destination
+            is_inbound_ax25 = (dst_base == my_base and dst_call.upper() != self.my_callsign.upper() and
+                               src_base != my_base)
+
+            # Check APRS message addressee
+            is_inbound_message = False
+            message_addressee = self._extract_aprs_message_addressee(info_str)
+            if message_addressee:
+                msg_base = message_addressee.upper().split('-')[0]
+                is_inbound_message = (msg_base == my_base and message_addressee.upper() != self.my_callsign.upper() and
+                                      src_base != my_base)
+
+            is_inbound = is_inbound_ax25 or is_inbound_message
 
             if not is_outbound and not is_inbound:
                 if constants.DEBUG:
@@ -195,12 +246,23 @@ class Digipeater:
         # Rule 4: Check if path contains WIDEn-N or our callsign
         # EXCEPTION: SELF mode inbound doesn't require viable hop (last mile delivery)
         if self.mode == "SELF":
-            dst_base = dst_call.upper().split('-')[0]
             my_base = self.my_callsign.upper().split('-')[0]
             src_base = src_call.upper().split('-')[0]
 
-            # If this is inbound to our callsign, skip viable hop check
-            if dst_base == my_base and dst_call.upper() != self.my_callsign.upper() and src_base != my_base:
+            # Check AX.25 destination
+            dst_base = dst_call.upper().split('-')[0]
+            is_inbound_ax25 = (dst_base == my_base and dst_call.upper() != self.my_callsign.upper() and src_base != my_base)
+
+            # Check APRS message addressee
+            is_inbound_message = False
+            message_addressee = self._extract_aprs_message_addressee(info_str)
+            if message_addressee:
+                msg_base = message_addressee.upper().split('-')[0]
+                is_inbound_message = (msg_base == my_base and message_addressee.upper() != self.my_callsign.upper() and
+                                      src_base != my_base)
+
+            # If this is inbound to our callsign (either way), skip viable hop check
+            if is_inbound_ax25 or is_inbound_message:
                 return True  # Allow regardless of path state
 
         # For all other cases, check for viable hop
