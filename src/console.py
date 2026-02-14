@@ -1592,6 +1592,8 @@ class CommandProcessor:
             self.last_beacon_time = None
 
         self.gps_poll_task = None  # Background GPS polling task
+        self.gps_consecutive_failures = 0  # Track consecutive GPS failures for auto-recovery
+        self.gps_needs_restart = False  # Flag to trigger GPS task restart
         # Attach to radio so frame hooks can access it
         self.radio.cmd_processor = self
 
@@ -2787,7 +2789,7 @@ class CommandProcessor:
     async def gps_poll_and_beacon_task(self):
         """Background task to poll GPS and send beacons when enabled."""
 
-        while self.radio.running:
+        while self.radio.running and not self.gps_needs_restart:
             try:
                 # Poll GPS every 5 seconds
                 await asyncio.sleep(5)
@@ -2802,6 +2804,7 @@ class CommandProcessor:
                     # We got valid position data - update lock status
                     self.gps_position = position
                     self.gps_locked = True  # Override lock check if we got valid data
+                    self.gps_consecutive_failures = 0  # Reset failure counter on success
                     print_debug(f"GPS: {position['latitude']:.6f}, {position['longitude']:.6f} (lock_check={gps_locked})", level=6)
 
                     # Broadcast position update to web clients
@@ -2834,7 +2837,16 @@ class CommandProcessor:
                     # No GPS position data
                     self.gps_position = None
                     self.gps_locked = False
-                    print_debug(f"GPS: No position data (lock_check={gps_locked})", level=6)
+                    self.gps_consecutive_failures += 1
+                    print_debug(f"GPS: No position data (lock_check={gps_locked}, failures={self.gps_consecutive_failures})", level=6)
+
+                    # Auto-recovery: Restart GPS task after 3 consecutive failures
+                    # This recovers from GPS getting stuck returning error responses
+                    if self.gps_consecutive_failures == 3:
+                        print_warning("GPS auto-recovery: Restarting GPS task after 3 consecutive failures")
+                        self.gps_needs_restart = True
+                        # Break out of GPS polling loop - gps_monitor will restart us
+                        break
 
                     # Check if beacon is enabled with manual location (MYLOCATION)
                     if self.tnc_config.get("BEACON") == "ON" and self.tnc_config.get("MYLOCATION"):
@@ -3838,7 +3850,11 @@ async def autosave_monitor(radio):
 
 
 async def gps_monitor(radio):
-    """Monitor GPS and send beacons when enabled."""
+    """Monitor GPS and send beacons when enabled.
+
+    Supervises the GPS polling task and automatically restarts it when needed
+    for auto-recovery from GPS communication failures.
+    """
     # Wait for command processor to be initialized
     while radio.running:
         if hasattr(radio, "cmd_processor") and radio.cmd_processor:
@@ -3848,8 +3864,42 @@ async def gps_monitor(radio):
     if not radio.running:
         return
 
-    # Run GPS polling and beacon task
-    await radio.cmd_processor.gps_poll_and_beacon_task()
+    # Run GPS polling task with automatic restart support
+    while radio.running:
+        # Run GPS polling and beacon task
+        await radio.cmd_processor.gps_poll_and_beacon_task()
+
+        # Check if task exited due to restart request
+        if radio.cmd_processor.gps_needs_restart:
+            print_debug("GPS monitor: Task restart requested, performing recovery...", level=2)
+
+            # Step 1: Flush stale GPS responses from rx_queue
+            # This clears any error responses that might be stuck in the queue
+            print_debug("Flushing rx_queue to clear stale GPS responses...", level=2)
+            flushed_count = 0
+            while not radio.rx_queue.empty():
+                try:
+                    _ = radio.rx_queue.get_nowait()
+                    flushed_count += 1
+                except asyncio.QueueEmpty:
+                    break
+
+            if flushed_count > 0:
+                print_debug(f"Flushed {flushed_count} stale response(s) from queue", level=2)
+
+            # Step 2: Reset restart flag and failure counter for fresh start
+            radio.cmd_processor.gps_needs_restart = False
+            radio.cmd_processor.gps_consecutive_failures = 0
+
+            print_info("GPS auto-recovery: Task restarted with clean state")
+
+            # Step 3: Wait a moment before restarting to let BLE settle
+            await asyncio.sleep(2)
+
+            # Loop will restart the task automatically
+        else:
+            # Task exited normally (radio.running = False), don't restart
+            break
 
 
 async def message_retry_monitor(radio):
@@ -4183,6 +4233,19 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
             )
             await client.connect()
             print_info("Connected")
+
+            # Pair with device for encrypted characteristics (required on Windows)
+            # On Linux, pairing is handled externally via bluetoothctl
+            # On Windows, Bleak requires programmatic pairing for encrypted writes
+            try:
+                await client.pair()
+                print_info("Device paired (encrypted connection established)")
+            except NotImplementedError:
+                # pair() not available on this platform (e.g., Linux/BlueZ)
+                print_debug("Pairing not implemented on this platform (using system pairing)", level=3)
+            except Exception as e:
+                # Pairing failed - might already be paired or not required
+                print_debug(f"Pairing attempt: {e}", level=3)
 
             await client.start_notify(RADIO_INDICATE_UUID, handle_indication)
             await client.start_notify(TNC_RX_UUID, handle_tnc)
