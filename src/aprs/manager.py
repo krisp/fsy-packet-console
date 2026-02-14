@@ -238,6 +238,12 @@ class APRSManager:
             if os.path.exists(self.db_file) and not os.access(self.db_file, os.W_OK):
                 print_error(f"No write permission for database file {self.db_file}")
                 return 0
+
+            # Create snapshots of data structures to prevent "dictionary changed size during iteration"
+            # These can be modified by the event loop while save runs in thread pool
+            stations_snapshot = dict(self.stations)
+            messages_snapshot = list(self.monitored_messages)
+
             # Prepare data for serialization
             data = {
                 "stations": {},
@@ -248,7 +254,7 @@ class APRSManager:
             }
 
             # Convert stations to JSON-serializable format
-            for callsign, station in self.stations.items():
+            for callsign, station in stations_snapshot.items():
                 station_data = {
                     "callsign": station.callsign,
                     "first_heard": station.first_heard.isoformat(),
@@ -393,7 +399,7 @@ class APRSManager:
                 data["stations"][callsign] = station_data
 
             # Save monitored messages
-            for msg in self.monitored_messages:
+            for msg in messages_snapshot:
                 msg_data = {
                     "timestamp": msg.timestamp.isoformat(),
                     "from_call": msg.from_call,
