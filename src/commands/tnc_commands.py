@@ -380,7 +380,7 @@ class TNCCommandHandler(CommandHandler):
     async def digipeater(self, args):
         """Enable or disable digipeater mode."""
         if not args:
-            current = self.tnc_config.get("DIGIPEATER") or "OFF"
+            current = self.tnc_config.get("DIGIPEAT") or "OFF"
             print_pt(f"DIGIPEATER: {current}")
             print_pt("")
             print_pt("When ON, the TNC will digipeat packets with MYALIAS or MYCALL in path.")
@@ -391,12 +391,12 @@ class TNCCommandHandler(CommandHandler):
             print_error("Usage: DIGIPEATER [ON|OFF]")
             return
 
-        self.tnc_config.set("DIGIPEATER", value)
+        self.tnc_config.set("DIGIPEAT", value)
         print_info(f"DIGIPEATER set to {value}")
 
-        # Apply to AX25 adapter
-        if hasattr(self.cmd_processor, 'ax25') and self.ax25:
-            self.ax25.digipeater_enabled = (value == "ON")
+        # Apply to Digipeater object
+        if hasattr(self.radio, 'digipeater') and self.radio.digipeater:
+            self.radio.digipeater.enabled = (value == "ON")
 
     @command("DISPLAY",
              help_text="Display all TNC parameters",
