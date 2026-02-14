@@ -3022,7 +3022,7 @@ class CommandProcessor:
                 info += comment
 
             # Send via APRS
-            await self.radio.send_aprs(mycall, info, to_call="APRS", path=path)
+            await self.radio.send_aprs(mycall, info, to_call="APFSYC", path=path)
 
             # Update timestamp (both in-memory and persisted to config)
             now = datetime.now(timezone.utc)
@@ -3066,7 +3066,7 @@ class CommandProcessor:
             mycall = self.tnc_config.get("MYCALL") or "NOCALL"
 
             # Send via radio
-            await self.radio.send_aprs(mycall, info, to_call="APRS", path=None)
+            await self.radio.send_aprs(mycall, info, to_call="APFSYC", path=None)
 
             # Track in APRS manager for retry/ack handling
             self.aprs_manager.add_sent_message(to_call.upper(), message_text, message_id)
@@ -3092,7 +3092,7 @@ class CommandProcessor:
             mycall = self.tnc_config.get("MYCALL") or "NOCALL"
 
             # Send via radio
-            await self.radio.send_aprs(mycall, info, to_call="APRS", path=None)
+            await self.radio.send_aprs(mycall, info, to_call="APFSYC", path=None)
 
             print_debug(f"📥 ACK sent to {to_call} for message {message_id}", level=5)
 
@@ -3954,7 +3954,7 @@ async def message_retry_monitor(radio):
 
                 # Resend the message
                 await radio.send_aprs(
-                    aprs_mgr.my_callsign, aprs_message, to_call="APRS"
+                    aprs_mgr.my_callsign, aprs_message, to_call="APFSYC"
                 )
 
                 # Update retry tracking

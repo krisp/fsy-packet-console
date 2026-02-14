@@ -502,7 +502,7 @@ class RadioController:
         resp = await self.send_command(CMD_SET_HT_POWER, bytes([power_byte]))
         return resp is not None
 
-    async def send_aprs(self, from_call, message, to_call="APRS", path=None):
+    async def send_aprs(self, from_call, message, to_call="APFSYC", path=None):
         if path is None:
             path = ["WIDE1-1", "WIDE2-1"]
 
