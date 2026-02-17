@@ -5,7 +5,7 @@
 import { APRSApi } from './api.js';
 import { APRSMap } from './map.js';
 import { renderStationList, renderWeatherList, renderMessageList } from './stations.js';
-import { formatTime } from './charts.js';
+import { formatRelativeTime, escapeHtml, SSEManager } from './utils.js';
 
 class APRSApp {
     constructor() {
@@ -469,66 +469,31 @@ class APRSApp {
      * Connect to Server-Sent Events for real-time updates
      */
     connectRealtime() {
-        // Initialize reconnection state if not exists
-        if (!this.reconnectAttempts) this.reconnectAttempts = 0;
-        if (!this.maxReconnectDelay) this.maxReconnectDelay = 30000; // Max 30 seconds
-        if (!this.baseReconnectDelay) this.baseReconnectDelay = 1000; // Start at 1 second
+        // Close existing connection if any
+        if (this.sse) {
+            this.sse.close();
+            this.sse = null;
+        }
 
-        try {
-            // Close existing connection if any
-            if (this.sse) {
-                this.sse.close();
-                this.sse = null;
+        const parseEvent = (type) => (e) => {
+            try {
+                this.handleRealtimeUpdate(type, JSON.parse(e.data));
+            } catch (err) {
+                console.error(`Error parsing ${type} event:`, err);
             }
+        };
 
-            this.sse = this.api.connectSSE(
-                // Event handler
-                (type, data) => {
-                    this.handleRealtimeUpdate(type, data);
-                },
-                // Connection status handler
-                (status) => {
-                    if (status === 'connected') {
-                        // Reset reconnection counter on successful connection
-                        this.reconnectAttempts = 0;
-                        this.setConnectionStatus('connected');
-                    } else if (status === 'disconnected') {
-                        this.setConnectionStatus('disconnected');
-                        this.scheduleReconnect();
-                    }
-                }
-            );
-
-            console.log('Connected to real-time updates');
-        } catch (error) {
-            console.error('Failed to connect SSE:', error);
-            this.setConnectionStatus('disconnected');
-            this.scheduleReconnect();
-        }
-    }
-
-    /**
-     * Schedule reconnection with exponential backoff
-     */
-    scheduleReconnect() {
-        if (this.reconnectTimeout) {
-            clearTimeout(this.reconnectTimeout);
-        }
-
-        this.reconnectAttempts++;
-
-        // Calculate delay with exponential backoff
-        const delay = Math.min(
-            this.baseReconnectDelay * Math.pow(2, this.reconnectAttempts - 1),
-            this.maxReconnectDelay
-        );
-
-        console.log(`Reconnecting in ${delay/1000}s (attempt ${this.reconnectAttempts})...`);
-        this.setConnectionStatus('reconnecting', delay);
-
-        this.reconnectTimeout = setTimeout(() => {
-            this.connectRealtime();
-        }, delay);
+        this.sse = new SSEManager('/api/events', {
+            listeners: {
+                station_update: parseEvent('station_update'),
+                weather_update: parseEvent('weather_update'),
+                message_received: parseEvent('message_received'),
+                gps_update: parseEvent('gps_update'),
+                connected: () => {},  // handled via onConnected
+            },
+            onConnected: () => this.setConnectionStatus('connected'),
+            onDisconnected: () => this.setConnectionStatus('disconnected'),
+        });
     }
 
     /**
@@ -599,8 +564,8 @@ class APRSApp {
         }
 
         // Add to activity feed (always show in feed, even if filtered from map)
-        const posText = station.has_position ? ` (${station.last_position.grid_square})` : '';
-        this.addActivityItem('station', `${station.callsign}${posText} heard`);
+        const posText = station.has_position ? ` (${escapeHtml(station.last_position.grid_square)})` : '';
+        this.addActivityItem('station', `${escapeHtml(station.callsign)}${posText} heard`);
 
         // Update local coverage if enabled (in case this is a new direct station)
         const showLocalCoverageCheckbox = document.getElementById('show-local-coverage');
@@ -647,7 +612,7 @@ class APRSApp {
 
         // Add to activity feed (always show in feed, even if filtered from map)
         const wx = weatherData.last_weather;
-        let wxText = `${weatherData.callsign} weather:`;
+        let wxText = `${escapeHtml(weatherData.callsign)} weather:`;
         if (wx.temperature !== null) wxText += ` ${wx.temperature}°F`;
         if (wx.humidity !== null) wxText += ` ${wx.humidity}%`;
         if (wx.wind_speed !== null) wxText += ` Wind ${wx.wind_speed}mph`;
@@ -666,7 +631,7 @@ class APRSApp {
         this.loadMessages();
 
         // Add to activity feed
-        const msgText = `${message.from_call} → ${message.to_call}: ${message.message.substring(0, 40)}${message.message.length > 40 ? '...' : ''}`;
+        const msgText = `${escapeHtml(message.from_call)} → ${escapeHtml(message.to_call)}: ${escapeHtml(message.message.substring(0, 40))}${message.message.length > 40 ? '...' : ''}`;
         this.addActivityItem('message', msgText);
 
         // Update status
@@ -848,13 +813,13 @@ class APRSApp {
             return `<div class="monitored-message-item">
                 <div class="monitored-message-header">
                     <div class="monitored-message-route">
-                        <span class="monitored-from callsign-link" onclick="window.location.href='/station/${encodeURIComponent(msg.from_call)}'">${msg.from_call}</span>
+                        <span class="monitored-from callsign-link" onclick="window.location.href='/station/${encodeURIComponent(msg.from_call)}'">${escapeHtml(msg.from_call)}</span>
                         <span class="monitored-arrow">→</span>
-                        <span class="monitored-to callsign-link" onclick="window.location.href='/station/${encodeURIComponent(msg.to_call)}'">${msg.to_call}</span>
+                        <span class="monitored-to callsign-link" onclick="window.location.href='/station/${encodeURIComponent(msg.to_call)}'">${escapeHtml(msg.to_call)}</span>
                     </div>
                     <div class="monitored-message-time">${time}</div>
                 </div>
-                <div class="monitored-message-text">${msg.message}</div>
+                <div class="monitored-message-text">${escapeHtml(msg.message)}</div>
             </div>`;
         }).join('');
     }

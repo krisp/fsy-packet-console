@@ -9,6 +9,8 @@ Database source: https://github.com/hessu/aprs-deviceid
 License: CC BY-SA 2.0
 """
 
+from src.utils import print_warning, print_error
+
 import os
 import yaml
 from pathlib import Path
@@ -59,7 +61,7 @@ class DeviceIdentifier:
     def _load_database(self):
         """Load and parse the YAML device database."""
         if not self.database_path.exists():
-            print(f"Warning: Device database not found at {self.database_path}")
+            print_warning(f"Device database not found at {self.database_path}")
             return
 
         try:
@@ -78,7 +80,7 @@ class DeviceIdentifier:
                 }
 
         except Exception as e:
-            print(f"Error loading device database: {e}")
+            print_error(f"Error loading device database: {e}")
 
     def _match_tocall(self, pattern: str, tocall: str) -> bool:
         """Match a tocall against a pattern with wildcards.

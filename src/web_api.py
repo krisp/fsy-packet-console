@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from aiohttp import web
 
+from .utils import print_warning, print_error as log_error
 from .aprs_manager import APRSManager
 from .aprs.models import (
     APRSMessage,
@@ -244,12 +245,6 @@ class APIHandlers:
 
         station = self.aprs.stations.get(callsign_clean)
         if not station:
-            # Debug: show what we're looking for and what's available
-            print(f"DEBUG: Looking for station '{callsign_clean}'")
-            print(f"DEBUG: Available stations with similar names:")
-            for key in self.aprs.stations.keys():
-                if callsign_clean.replace('/', '') in key or key.replace('/', '') in callsign_clean:
-                    print(f"  - '{key}'")
             raise web.HTTPNotFound(text=f"Station {callsign_clean} not found")
 
         return web.json_response(serialize_station(station, include_history=True))
@@ -975,7 +970,7 @@ class APIHandlers:
         provided_password = data.get("password", "")
         if provided_password != configured_password:
             # Log failed attempt
-            print(f"WARNING: Failed beacon comment update attempt from {request.remote}")
+            print_warning(f"Failed beacon comment update attempt from {request.remote}")
             return web.json_response({
                 "success": False,
                 "error": "Invalid password"
@@ -1010,7 +1005,7 @@ class APIHandlers:
                 await self.send_beacon()
                 beacon_sent = True
             except Exception as e:
-                print(f"ERROR: Failed to send beacon: {e}")
+                log_error(f"Failed to send beacon: {e}")
 
         # Build response
         if quiet:

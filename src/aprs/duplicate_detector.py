@@ -3,9 +3,8 @@
 import hashlib
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Set
+from typing import Dict, List
 
-from .models import APRSStation
 from src.utils import print_debug
 
 # Duplicate packet suppression window (seconds)

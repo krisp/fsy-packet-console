@@ -13,8 +13,9 @@ Based on Direwolf implementation: https://github.com/wb2osz/direwolf
 import asyncio
 import struct
 import sys
+import traceback
 from typing import List, Optional, Dict, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 
 from src.utils import print_info, print_debug, print_error
 from src.protocol import kiss_unwrap
@@ -559,8 +560,6 @@ class AGWPEBridge:
                 await client.send_frame(resp)
 
         except Exception as e:
-            import traceback
-
             print_error(f"AGWPE: Connect error: {e}")
             print_debug(
                 f"AGWPE: Connect traceback: {traceback.format_exc()}", level=5
@@ -623,8 +622,6 @@ class AGWPEBridge:
             await self._handle_connect(client, frame, path)
 
         except Exception as e:
-            import traceback
-
             print_error(f"AGWPE: Connect via error: {e}")
             print_debug(
                 f"AGWPE: Connect via traceback: {traceback.format_exc()}",
@@ -638,8 +635,8 @@ class AGWPEBridge:
                 resp.call_from = frame.call_from
                 resp.call_to = frame.call_to
                 await client.send_frame(resp)
-            except Exception:
-                pass
+            except Exception as e:
+                print_debug(f"Failed to send connected data response: {e}")
 
     async def _handle_send_connected_data(
         self, client: AGWPEClient, frame: AGWPEFrame
@@ -696,8 +693,6 @@ class AGWPEBridge:
                 print_debug(f"AGWPE: Successfully sent data", level=5)
 
         except Exception as e:
-            import traceback
-
             print_error(f"AGWPE: Send connected data error: {e}")
             print_debug(f"AGWPE: Traceback: {traceback.format_exc()}", level=5)
 
@@ -907,14 +902,7 @@ class AGWPEBridge:
 
             # Build data portion (header + info if present)
             if info:
-                try:
-                    # Try to decode as text
-                    info_text = info.decode("ascii", errors="replace")
-                    data = header_line.encode("ascii") + info.encode(
-                        "ascii", errors="replace"
-                    )
-                except Exception:
-                    data = header_line.encode("ascii") + info
+                data = header_line.encode("ascii") + info
             else:
                 data = header_line.encode("ascii")
 
@@ -949,8 +937,6 @@ class AGWPEBridge:
                         )
 
         except Exception as e:
-            import traceback
-
             print_error(f"AGWPE: Error processing monitored frame: {e}")
             print_debug(f"AGWPE: Traceback: {traceback.format_exc()}", level=5)
 

@@ -5,7 +5,6 @@ Tracks APRS messages sent to our station and weather reports from other stations
 
 import asyncio
 import gzip
-import hashlib
 import json
 import math
 import os
@@ -31,8 +30,9 @@ from .models import (
     APRSMessage, APRSPosition, APRSWeather, APRSStatus,
     APRSTelemetry, APRSStation
 )
-from .duplicate_detector import DuplicateDetector
+from .duplicate_detector import DuplicateDetector, DUPLICATE_WINDOW
 from .geo_utils import latlon_to_maidenhead, maidenhead_to_latlon, calculate_dew_point
+from .formatters import APRSFormatters
 from .weather_forecast import calculate_zambretti_code, adjust_pressure_to_sea_level, ZAMBRETTI_FORECASTS
 from .digipeater_stats import DigipeaterStats, DigipeaterActivity
 
@@ -41,15 +41,11 @@ from .digipeater_stats import DigipeaterStats, DigipeaterActivity
 # duplicate definitions and potential isinstance() failures.
 
 # Message retry configuration
-MESSAGE_RETRY_TIMEOUT = 30  # DEPRECATED: Use fast/slow timeouts instead
 MESSAGE_RETRY_FAST = 20  # seconds between fast retry attempts (not digipeated)
 MESSAGE_RETRY_SLOW = 600  # seconds between slow retry attempts (digipeated but not ACKed) - 10 minutes
 MESSAGE_MAX_RETRIES = (
     3  # maximum number of transmission attempts (original + 2 retries)
 )
-
-# Duplicate packet suppression configuration
-DUPLICATE_WINDOW = 30  # seconds to track packet duplicates
 
 def ensure_utc_aware(dt: Optional[datetime]) -> Optional[datetime]:
     """Convert naive datetime to UTC-aware datetime.
@@ -118,9 +114,6 @@ class APRSManager:
         self.duplicate_detector = DuplicateDetector()
         self.duplicate_detector.set_stations_reference(self.stations)
         self.duplicate_detector.set_manager_reference(self)
-
-        # Legacy: Keep _duplicate_cache for backwards compatibility with is_duplicate_packet()
-        self._duplicate_cache: Dict[str, float] = {}
 
         # Digipeater statistics
         self.digipeater_stats = DigipeaterStats(
@@ -438,7 +431,7 @@ class APRSManager:
                 if os.path.exists(temp_file):
                     try:
                         os.remove(temp_file)
-                    except:
+                    except OSError:
                         pass
                 raise write_error
 
@@ -743,8 +736,8 @@ class APRSManager:
                 ):
                     self.messages.append(msg)
 
-            # Restore migration state
-            self.migrations = data.get("migrations", {})
+            # Note: migration state already loaded at line ~510 above
+            # (not reassigned here to avoid overwriting mutations)
 
             # Restore digipeater stats
             if "digipeater_stats" in data:
@@ -811,7 +804,14 @@ class APRSManager:
         to_call_normalized = normalize_ssid(to_call_upper)
         my_call_normalized = normalize_ssid(self.my_callsign)
 
+        # Exact match (with SSID normalization)
         result = (to_call_normalized == my_call_normalized)
+
+        # Also match if the to_call is just the base callsign (no SSID)
+        # In APRS, a message addressed to "K1FSY" should be received by
+        # K1FSY-5, K1FSY-9, etc.
+        if not result and "-" not in to_call_upper:
+            result = (to_call_upper == self.my_callsign_base)
 
         print_debug(
             f"is_message_for_me: to_call='{to_call}' -> '{to_call_normalized}', my_callsign='{my_call_normalized}', result={result}",
@@ -819,50 +819,6 @@ class APRSManager:
         )
 
         return result
-
-    def is_duplicate_packet(self, callsign: str, info: str) -> bool:
-        """Check if packet is a duplicate based on source and content.
-
-        Packets from the same source with identical content within the
-        duplicate window (30 seconds) are considered duplicates.
-
-        This suppresses multiple digipeater copies of the same packet
-        while still allowing new packets from the same station.
-
-        Args:
-            callsign: Source callsign
-            info: Packet information field content
-
-        Returns:
-            True if packet is a duplicate, False otherwise
-        """
-        # Create hash of source + content
-        packet_key = f"{callsign.upper()}:{info}"
-        packet_hash = hashlib.md5(packet_key.encode()).hexdigest()
-
-        current_time = time.time()
-
-        # Clean old entries from cache (older than duplicate window)
-        expired = [
-            h
-            for h, ts in self._duplicate_cache.items()
-            if current_time - ts > DUPLICATE_WINDOW
-        ]
-        for h in expired:
-            del self._duplicate_cache[h]
-
-        # Check if this packet hash exists in cache
-        if packet_hash in self._duplicate_cache:
-            # Duplicate found
-            print_debug(
-                f"APRS duplicate suppressed: {callsign} (digipeated copy)",
-                level=6,
-            )
-            return True
-
-        # Not a duplicate - add to cache
-        self._duplicate_cache[packet_hash] = current_time
-        return False
 
     def record_digipeater_path(self, callsign: str, digipeater_path: List[str]):
         """Record digipeater paths for a station (used even for duplicate packets).
@@ -2368,281 +2324,31 @@ class APRSManager:
         }
 
     def format_message(self, msg: APRSMessage, index: int = None) -> str:
-        """Format message for display.
-
-        Args:
-            msg: Message to format
-            index: Optional message index number
-
-        Returns:
-            Formatted message string
-        """
-        time_str = msg.timestamp.strftime("%Y-%m-%d %H:%M:%S")
-
-        prefix = f"[{index}] " if index is not None else ""
-
-        # Format based on direction
-        if msg.direction == "sent":
-            # Sent message - show ACK status and recipient
-            ack_mark = "✓" if msg.ack_received else "⋯"
-            status_color = "green" if msg.ack_received else "yellow"
-            return f"{prefix}[{ack_mark}] {time_str} To: {msg.to_call}\n  {msg.message}"
-        else:
-            # Received message - show read status and sender
-            status = "NEW" if not msg.read else "READ"
-            msg_id_str = f" {{{{msg_id}}}}" if msg.message_id else ""
-            return f"{prefix}[{status}] {time_str} From: {msg.from_call}\n  {msg.message}{msg_id_str}"
+        """Format message for display. Delegates to APRSFormatters."""
+        return APRSFormatters.format_message(msg, index)
 
     def format_weather(self, wx: APRSWeather) -> Dict[str, str]:
-        """Format weather report for display.
-
-        Args:
-            wx: Weather report
-
-        Returns:
-            Dictionary of formatted weather fields
-        """
-        return {
-            "station": wx.station,
-            "time": wx.timestamp.strftime("%H:%M:%S"),
-            "temp": (
-                f"{wx.temperature}°F" if wx.temperature is not None else "---"
-            ),
-            "humidity": (
-                f"{wx.humidity}%" if wx.humidity is not None else "---"
-            ),
-            "wind": self._format_wind(wx),
-            "pressure": (
-                f"{wx.pressure} mb" if wx.pressure is not None else "---"
-            ),
-            "rain_1h": f'{wx.rain_1h}"' if wx.rain_1h is not None else "---",
-        }
+        """Format weather report for display. Delegates to APRSFormatters."""
+        return APRSFormatters.format_weather(wx)
 
     def _format_wind(self, wx: APRSWeather) -> str:
-        """Format wind information.
-
-        Args:
-            wx: Weather report
-
-        Returns:
-            Formatted wind string
-        """
-        if wx.wind_speed is None:
-            return "---"
-
-        result = f"{wx.wind_speed} mph"
-
-        if wx.wind_direction is not None:
-            # Convert degrees to compass direction
-            directions = [
-                "N",
-                "NNE",
-                "NE",
-                "ENE",
-                "E",
-                "ESE",
-                "SE",
-                "SSE",
-                "S",
-                "SSW",
-                "SW",
-                "WSW",
-                "W",
-                "WNW",
-                "NW",
-                "NNW",
-            ]
-            index = round(wx.wind_direction / 22.5) % 16
-            result = f"{directions[index]} {result}"
-
-        if wx.wind_gust is not None and wx.wind_gust > 0:
-            result += f" (gust {wx.wind_gust})"
-
-        return result
+        """Format wind information. Delegates to APRSFormatters."""
+        return APRSFormatters._format_wind(wx)
 
     @staticmethod
     def latlon_to_maidenhead(lat: float, lon: float) -> str:
-        """Convert latitude/longitude to 6-digit Maidenhead grid square.
-
-        Args:
-            lat: Latitude in decimal degrees (-90 to +90)
-            lon: Longitude in decimal degrees (-180 to +180)
-
-        Returns:
-            6-character Maidenhead grid square (e.g., "FN31pr")
-        """
-        # Adjust longitude to 0-360 range
-        lon_adj = lon + 180
-        lat_adj = lat + 90
-
-        # Field (first 2 chars): 20° lon x 10° lat
-        field_lon = int(lon_adj / 20)
-        field_lat = int(lat_adj / 10)
-
-        # Square (next 2 digits): 2° lon x 1° lat within field
-        square_lon = int((lon_adj % 20) / 2)
-        square_lat = int((lat_adj % 10) / 1)
-
-        # Subsquare (last 2 chars): 5' lon x 2.5' lat within square
-        # 2° = 120', so 120/24 = 5' per subsquare
-        # 1° = 60', so 60/24 = 2.5' per subsquare
-        subsq_lon = int(((lon_adj % 2) * 60) / 5)
-        subsq_lat = int(((lat_adj % 1) * 60) / 2.5)
-
-        # Build grid square string
-        grid = (
-            chr(ord("A") + field_lon)
-            + chr(ord("A") + field_lat)
-            + str(square_lon)
-            + str(square_lat)
-            + chr(ord("a") + subsq_lon)
-            + chr(ord("a") + subsq_lat)
-        )
-
-        return grid
+        """Convert lat/lon to Maidenhead grid. Delegates to geo_utils."""
+        return latlon_to_maidenhead(lat, lon)
 
     @staticmethod
     def maidenhead_to_latlon(grid: str) -> tuple:
-        """Convert Maidenhead grid square to latitude/longitude (center of grid).
-
-        Supports 2-10 character grid squares:
-        - 2 chars: Field (20° x 10°) e.g., "FN"
-        - 4 chars: Square (2° x 1°) e.g., "FN31"
-        - 6 chars: Subsquare (5' x 2.5') e.g., "FN31pr"
-        - 8 chars: Extended subsquare (12.5" x 6.25") e.g., "FN31pr34"
-        - 10 chars: Super extended (0.52" x 0.26") e.g., "FN31pr34ab"
-
-        Args:
-            grid: Maidenhead grid square (2-10 characters)
-
-        Returns:
-            Tuple of (latitude, longitude) in decimal degrees, representing
-            the center of the grid square.
-
-        Raises:
-            ValueError: If grid square format is invalid
-        """
-        grid = grid.upper()
-        grid_len = len(grid)
-
-        if grid_len < 2 or grid_len > 10 or grid_len % 2 != 0:
-            raise ValueError(
-                f"Grid square must be 2, 4, 6, 8, or 10 characters, got {grid_len}"
-            )
-
-        # Field (characters 0-1): A-R for lon, A-R for lat
-        if not (grid[0].isalpha() and grid[1].isalpha()):
-            raise ValueError(f"First 2 characters must be letters: {grid[:2]}")
-
-        field_lon = ord(grid[0]) - ord('A')
-        field_lat = ord(grid[1]) - ord('A')
-
-        if field_lon < 0 or field_lon > 17 or field_lat < 0 or field_lat > 17:
-            raise ValueError(f"Field must be A-R: {grid[:2]}")
-
-        lon = field_lon * 20 - 180
-        lat = field_lat * 10 - 90
-
-        # Square (characters 2-3): 0-9 for lon, 0-9 for lat
-        if grid_len >= 4:
-            if not (grid[2].isdigit() and grid[3].isdigit()):
-                raise ValueError(f"Characters 3-4 must be digits: {grid[2:4]}")
-
-            square_lon = int(grid[2])
-            square_lat = int(grid[3])
-            lon += square_lon * 2
-            lat += square_lat * 1
-
-        # Subsquare (characters 4-5): a-x for lon, a-x for lat
-        if grid_len >= 6:
-            grid_lower = grid[4:6].lower()
-            if not (grid_lower[0].isalpha() and grid_lower[1].isalpha()):
-                raise ValueError(f"Characters 5-6 must be letters: {grid[4:6]}")
-
-            subsq_lon = ord(grid_lower[0]) - ord('a')
-            subsq_lat = ord(grid_lower[1]) - ord('a')
-
-            if subsq_lon < 0 or subsq_lon > 23 or subsq_lat < 0 or subsq_lat > 23:
-                raise ValueError(f"Subsquare must be a-x: {grid[4:6]}")
-
-            lon += subsq_lon * (2.0 / 24)  # 5 arc-minutes
-            lat += subsq_lat * (1.0 / 24)  # 2.5 arc-minutes
-
-        # Extended subsquare (characters 6-7): 0-9 for lon, 0-9 for lat
-        if grid_len >= 8:
-            if not (grid[6].isdigit() and grid[7].isdigit()):
-                raise ValueError(f"Characters 7-8 must be digits: {grid[6:8]}")
-
-            ext_lon = int(grid[6])
-            ext_lat = int(grid[7])
-            lon += ext_lon * (2.0 / 240)  # 30 arc-seconds
-            lat += ext_lat * (1.0 / 240)  # 15 arc-seconds
-
-        # Super extended subsquare (characters 8-9): a-x for lon, a-x for lat
-        if grid_len >= 10:
-            grid_lower = grid[8:10].lower()
-            if not (grid_lower[0].isalpha() and grid_lower[1].isalpha()):
-                raise ValueError(f"Characters 9-10 must be letters: {grid[8:10]}")
-
-            super_lon = ord(grid_lower[0]) - ord('a')
-            super_lat = ord(grid_lower[1]) - ord('a')
-
-            if super_lon < 0 or super_lon > 23 or super_lat < 0 or super_lat > 23:
-                raise ValueError(f"Super extended must be a-x: {grid[8:10]}")
-
-            lon += super_lon * (2.0 / 5760)  # 1.25 arc-seconds
-            lat += super_lat * (1.0 / 5760)  # 0.625 arc-seconds
-
-        # Return center of grid square by adding half the precision
-        if grid_len == 2:
-            lon += 10  # Half of 20°
-            lat += 5   # Half of 10°
-        elif grid_len == 4:
-            lon += 1   # Half of 2°
-            lat += 0.5 # Half of 1°
-        elif grid_len == 6:
-            lon += (2.0 / 48)  # Half of 5'
-            lat += (1.0 / 48)  # Half of 2.5'
-        elif grid_len == 8:
-            lon += (2.0 / 480)  # Half of 30"
-            lat += (1.0 / 480)  # Half of 15"
-        elif grid_len == 10:
-            lon += (2.0 / 11520) # Half of 1.25"
-            lat += (1.0 / 11520) # Half of 0.625"
-
-        return (lat, lon)
+        """Convert Maidenhead grid to lat/lon. Delegates to geo_utils."""
+        return maidenhead_to_latlon(grid)
 
     @staticmethod
     def calculate_dew_point(temp_f: float, humidity: int) -> Optional[float]:
-        """Calculate dew point from temperature and humidity using Magnus formula.
-
-        Args:
-            temp_f: Temperature in Fahrenheit
-            humidity: Relative humidity percentage (0-100)
-
-        Returns:
-            Dew point in Fahrenheit, or None if invalid inputs
-        """
-        if temp_f is None or humidity is None or humidity < 0 or humidity > 100:
-            return None
-
-        # Convert F to C for calculation
-        temp_c = (temp_f - 32) * 5.0 / 9.0
-
-        # Magnus formula constants
-        a = 17.27
-        b = 237.3
-
-        # Calculate gamma
-        alpha = ((a * temp_c) / (b + temp_c)) + math.log(humidity / 100.0)
-
-        # Calculate dew point in Celsius
-        dew_point_c = (b * alpha) / (a - alpha)
-
-        # Convert back to Fahrenheit
-        dew_point_f = (dew_point_c * 9.0 / 5.0) + 32
-
-        return dew_point_f
+        """Calculate dew point. Delegates to geo_utils."""
+        return calculate_dew_point(temp_f, humidity)
 
     def _parse_compressed_position(
         self,
@@ -2653,6 +2359,8 @@ class APRSManager:
         hop_count: int = 999,
         digipeater_path: List[str] = None,
         dest_addr: str = None,
+        timestamp: datetime = None,
+        frame_number: int = None,
     ) -> Optional[APRSPosition]:
         r"""Parse APRS compressed position format.
 
@@ -2823,7 +2531,10 @@ class APRSManager:
                 # Compressed format uses symbol tables / or \, followed by base-91 encoded data
                 if symbol_table_char in ('/', '\\') and len(info) >= offset + 13:
                     # Try to parse as compressed
-                    result = self._parse_compressed_position(info, offset, station, relay_call, hop_count, digipeater_path, dest_addr)
+                    result = self._parse_compressed_position(
+                        info, offset, station, relay_call, hop_count,
+                        digipeater_path, dest_addr,
+                        timestamp=timestamp, frame_number=frame_number)
                     if result:
                         return result
                     # If compressed parsing failed, fall through to try uncompressed
@@ -3290,126 +3001,19 @@ class APRSManager:
         return sorted(self.position_reports.values(), key=lambda x: x.station)
 
     def format_position(self, pos: APRSPosition) -> Dict[str, str]:
-        """Format position report for display.
-
-        Args:
-            pos: Position report
-
-        Returns:
-            Dictionary of formatted position fields
-        """
-        return {
-            "station": pos.station,
-            "time": pos.timestamp.strftime("%H:%M:%S"),
-            "latitude": f"{pos.latitude:.4f}",
-            "longitude": f"{pos.longitude:.4f}",
-            "grid": pos.grid_square,
-            "symbol": f"{pos.symbol_table}{pos.symbol_code}",
-            "comment": (
-                pos.comment[:30] if len(pos.comment) > 30 else pos.comment
-            ),  # Truncate long comments
-        }
+        """Format position report for display. Delegates to APRSFormatters."""
+        return APRSFormatters.format_position(pos)
 
     @staticmethod
     def clean_position_comment(comment: str) -> str:
-        """Clean position comment by removing redundant data fields.
-
-        Strips weather data, altitude, course/speed, and other APRS data
-        that's already parsed into dedicated fields.
-
-        Args:
-            comment: Raw comment from position report
-
-        Returns:
-            Cleaned comment (empty string if nothing meaningful remains)
-        """
-        if not comment:
-            return ""
-
-        # Strip common APRS data patterns:
-        # - Weather: cdddsddd, tddd, hddd, rddd, pddd, Pddd, bddddd, gddd
-        comment = re.sub(r"[ctrhpPbg]\d{2,5}", "", comment)
-        # - Wind: _ddd/ddd
-        comment = re.sub(r"_\d{3}/\d{3}", "", comment)
-        # - Altitude: /A=xxxxxx
-        comment = re.sub(r"/A=\d{6}", "", comment)
-        # - Course/speed: ccc/sss
-        comment = re.sub(r"\d{3}/\d{3}", "", comment)
-        # - PHG (Power-Height-Gain): PHGxxxx
-        comment = re.sub(r"PHG\d{4}", "", comment)
-        # - RNG (Range): RNGxxxx
-        comment = re.sub(r"RNG\d{4}", "", comment)
-        # - DFS (Direction Finding): DFSxxxx
-        comment = re.sub(r"DFS\d{4}", "", comment)
-
-        # Strip leading/trailing whitespace
-        comment = comment.strip()
-
-        return comment
+        """Clean position comment. Delegates to APRSFormatters."""
+        return APRSFormatters.clean_position_comment(comment)
 
     def format_combined_notification(
         self, pos: APRSPosition, wx: APRSWeather, relay_call: str = None
     ) -> str:
-        """Format combined position+weather notification for display.
-
-        Args:
-            pos: Position report
-            wx: Weather report (from same packet)
-            relay_call: Optional relay station (for third-party packets)
-
-        Returns:
-            Formatted string for single-line display
-        """
-        # Start with station (with relay path if third-party) and grid
-        if relay_call:
-            station_part = f"{pos.station} [📡 via {relay_call}]"
-        else:
-            station_part = pos.station
-        parts = [f"{station_part}: {pos.grid_square}"]
-
-        # Add weather summary (only non-None fields)
-        weather_parts = []
-        if wx.temperature is not None:
-            weather_parts.append(f"{wx.temperature}°F")
-        if wx.wind_speed is not None:
-            wind_str = f"{wx.wind_speed}mph"
-            if wx.wind_direction is not None:
-                # Convert to compass direction
-                directions = [
-                    "N",
-                    "NNE",
-                    "NE",
-                    "ENE",
-                    "E",
-                    "ESE",
-                    "SE",
-                    "SSE",
-                    "S",
-                    "SSW",
-                    "SW",
-                    "WSW",
-                    "W",
-                    "WNW",
-                    "NW",
-                    "NNW",
-                ]
-                index = round(wx.wind_direction / 22.5) % 16
-                wind_str = f"{directions[index]} {wind_str}"
-            weather_parts.append(wind_str)
-        if wx.humidity is not None:
-            weather_parts.append(f"{wx.humidity}%H")
-        if wx.pressure is not None:
-            weather_parts.append(f"{wx.pressure}mb")
-
-        if weather_parts:
-            parts.append(", ".join(weather_parts))
-
-        # Add cleaned comment if present and meaningful
-        cleaned_comment = self.clean_position_comment(pos.comment)
-        if cleaned_comment:
-            parts.append(cleaned_comment)
-
-        return " | ".join(parts)
+        """Format combined notification. Delegates to APRSFormatters."""
+        return APRSFormatters.format_combined_notification(pos, wx, relay_call)
 
     def get_all_stations(self, sort_by: str = "last") -> List[APRSStation]:
         """Get all tracked stations.
@@ -3849,418 +3453,28 @@ class APRSManager:
         return coverage
 
     def format_station_table_row(self, station: APRSStation) -> Dict[str, str]:
-        """Format station for table display.
-
-        Args:
-            station: Station to format
-
-        Returns:
-            Dictionary of formatted fields
-        """
-        # Get grid square from position
-        grid = (
-            station.last_position.grid_square
-            if station.last_position
-            else "---"
-        )
-
-        # Get temperature from weather
-        temp = (
-            f"{station.last_weather.temperature}°F"
-            if (
-                station.last_weather
-                and station.last_weather.temperature is not None
-            )
-            else "---"
-        )
-
-        # Format last heard time
-        last_heard = station.last_heard.strftime("%H:%M:%S")
-
-        return {
-            "callsign": station.callsign,
-            "grid": grid,
-            "temp": temp,
-            "last_heard": last_heard,
-            "packets": str(station.packets_heard),
-            "hops": station.hop_count,
-        }
+        """Format station for table display. Delegates to APRSFormatters."""
+        return APRSFormatters.format_station_table_row(station)
 
     def format_station_detail(self, station: APRSStation, pressure_threshold: float = 0.3) -> str:
-        """Format detailed station information.
-
-        Args:
-            station: Station to format
-            pressure_threshold: Pressure tendency threshold for Zambretti forecast (default: 0.3 mb/hr)
-
-        Returns:
-            Formatted multi-line string with all station details
-        """
-        lines = []
-        lines.append(f"Station: {station.callsign}")
-        if station.device:
-            lines.append(f"Device: {station.device}")
-        lines.append(
-            f"First Heard: {station.first_heard.strftime('%Y-%m-%d %H:%M:%S')}"
+        """Format detailed station information. Delegates to APRSFormatters."""
+        return APRSFormatters.format_station_detail(
+            station,
+            pressure_threshold=pressure_threshold,
+            get_zambretti_forecast=lambda cs, **kw: self.get_zambretti_forecast(cs, **kw),
         )
-        lines.append(
-            f"Last Heard: {station.last_heard.strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-        lines.append(f"Packets Heard: {station.packets_heard}")
-        lines.append("")
-
-        # Position info
-        if station.last_position:
-            pos = station.last_position
-            lines.append("Position:")
-            lines.append(f"  Grid Square: {pos.grid_square}")
-            lines.append(f"  Latitude: {pos.latitude:.4f}°")
-            lines.append(f"  Longitude: {pos.longitude:.4f}°")
-            if pos.altitude:
-                lines.append(f"  Altitude: {pos.altitude} ft")
-            lines.append(f"  Symbol: {pos.symbol_table}{pos.symbol_code}")
-            if pos.comment:
-                cleaned = self.clean_position_comment(pos.comment)
-                if cleaned:
-                    lines.append(f"  Comment: {cleaned}")
-            lines.append(
-                f"  Updated: {pos.timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-            lines.append("")
-        else:
-            lines.append("Position: Not available")
-            lines.append("")
-
-        # Weather info
-        if station.last_weather:
-            wx = station.last_weather
-            lines.append("Weather:")
-            if wx.temperature is not None:
-                lines.append(f"  Temperature: {wx.temperature}°F")
-            if wx.humidity is not None:
-                lines.append(f"  Humidity: {wx.humidity}%")
-            if wx.pressure is not None:
-                lines.append(f"  Pressure: {wx.pressure} mb")
-            if wx.wind_speed is not None:
-                wind_str = f"{wx.wind_speed} mph"
-                if wx.wind_direction is not None:
-                    directions = [
-                        "N",
-                        "NNE",
-                        "NE",
-                        "ENE",
-                        "E",
-                        "ESE",
-                        "SE",
-                        "SSE",
-                        "S",
-                        "SSW",
-                        "SW",
-                        "WSW",
-                        "W",
-                        "WNW",
-                        "NW",
-                        "NNW",
-                    ]
-                    index = round(wx.wind_direction / 22.5) % 16
-                    wind_str = f"{directions[index]} {wind_str}"
-                lines.append(f"  Wind: {wind_str}")
-            if wx.wind_gust is not None and wx.wind_gust > 0:
-                lines.append(f"  Wind Gust: {wx.wind_gust} mph")
-            if wx.rain_1h is not None:
-                lines.append(f'  Rain (1h): {wx.rain_1h}"')
-            if wx.rain_24h is not None:
-                lines.append(f'  Rain (24h): {wx.rain_24h}"')
-            if wx.rain_since_midnight is not None:
-                lines.append(f'  Rain (midnight): {wx.rain_since_midnight}"')
-            lines.append(
-                f"  Updated: {wx.timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-
-            # Show weather history sample count
-            if station.weather_history:
-                history_count = len(station.weather_history)
-                lines.append(
-                    f"  History: {history_count} sample{'s' if history_count != 1 else ''} stored"
-                )
-
-            # Add temperature history chart if available
-            if station.weather_history and any(
-                wx.temperature is not None
-                for wx in station.weather_history
-            ):
-                lines.append("")
-                lines.append(self._format_temperature_chart(station.weather_history))
-
-            # Add wind rose if wind data available
-            if station.weather_history and any(
-                wx.wind_direction is not None and wx.wind_speed is not None
-                for wx in station.weather_history
-            ):
-                lines.append("")
-                lines.append(self._format_wind_rose(station.weather_history))
-
-            # Add Zambretti weather forecast if pressure available
-            forecast = self.get_zambretti_forecast(station.callsign, pressure_threshold=pressure_threshold)
-            if forecast:
-                lines.append("")
-                lines.append("Forecast (Zambretti):")
-                lines.append(f"  {forecast['forecast']} (Code {forecast['code']})")
-
-                # Format trend with arrow
-                trend_arrow = '↑' if forecast['trend'] == 'rising' else '↓' if forecast['trend'] == 'falling' else '→'
-                lines.append(f"  Pressure trend: {trend_arrow} {forecast['trend']}")
-                lines.append(f"  Confidence: {forecast['confidence']}")
-
-            lines.append("")
-        else:
-            lines.append("Weather: Not available")
-            lines.append("")
-
-        # Status info
-        if station.last_status:
-            status = station.last_status
-            lines.append("Status:")
-            lines.append(f"  {status.status_text}")
-            lines.append(
-                f"  Updated: {status.timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-            lines.append("")
-        else:
-            lines.append("Status: Not available")
-            lines.append("")
-
-        # Telemetry info
-        if station.last_telemetry:
-            telem = station.last_telemetry
-            lines.append("Telemetry:")
-            lines.append(f"  Sequence: {telem.sequence}")
-            lines.append(
-                f"  Analog Channels: {', '.join(str(v) for v in telem.analog)}"
-            )
-            lines.append(f"  Digital Bits: {telem.digital}")
-            lines.append(
-                f"  Updated: {telem.timestamp.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-            if len(station.telemetry_sequence) > 1:
-                lines.append(
-                    f"  History: {len(station.telemetry_sequence)} packets stored"
-                )
-            lines.append("")
-        else:
-            lines.append("Telemetry: Not available")
-            lines.append("")
-
-        # Message statistics
-        lines.append("Messages:")
-        lines.append(f"  Sent by station: {station.messages_sent}")
-        lines.append(f"  Received (to us): {station.messages_received}")
-        lines.append("")
-
-        # Reception path information
-        lines.append("Reception:")
-        lines.append(
-            f"  Heard direct on RF: {'Yes' if station.heard_direct else 'No'}"
-        )
-        hop_str = (
-            "Direct RF"
-            if station.hop_count == 0
-            else (
-                f"{station.hop_count} hop{'s' if station.hop_count != 1 else ''}"
-                if station.hop_count < 999
-                else "Unknown"
-            )
-        )
-        lines.append(f"  Minimum hops: {hop_str}")
-        if station.relay_paths:
-            lines.append(f"  Relayed via: {', '.join(station.relay_paths)}")
-
-        return "\n".join(lines)
 
     def _format_temperature_chart(
         self, weather_history: List[APRSWeather], width: int = 60
     ) -> str:
-        """Create a text-based temperature chart from weather history.
-
-        Args:
-            weather_history: List of weather reports (should be sorted newest first)
-            width: Width of the chart in characters
-
-        Returns:
-            Multi-line ASCII chart showing temperature over time
-        """
-        if not weather_history:
-            return "  No temperature data available"
-
-        # Filter to only reports with temperature data
-        temps = [
-            (wx.timestamp, wx.temperature)
-            for wx in weather_history
-            if wx.temperature is not None
-        ]
-
-        if not temps:
-            return "  No temperature data available"
-
-        # Sort oldest to newest for chart (left to right = past to present)
-        temps.sort(key=lambda x: x[0])
-
-        # Extract values
-        timestamps = [t[0] for t in temps]
-        values = [t[1] for t in temps]
-
-        min_temp = min(values)
-        max_temp = max(values)
-        temp_range = max_temp - min_temp if max_temp != min_temp else 1
-
-        # Chart dimensions
-        height = 8
-        chart_width = min(width, len(values) * 2)
-
-        # Build chart
-        lines = []
-        lines.append(
-            f"  Temperature: {min_temp:.0f}°F - {max_temp:.0f}°F "
-            f"({len(temps)} samples)"
-        )
-        lines.append("  " + "─" * chart_width)
-
-        # Create chart rows (top to bottom = hot to cold)
-        for row in range(height):
-            threshold = max_temp - (temp_range * row / (height - 1))
-            line = "  "
-            for i, temp in enumerate(values):
-                if i >= chart_width // 2:
-                    break
-                # Use different characters for above/at/below threshold
-                if temp >= threshold - (temp_range / (height * 2)):
-                    if temp == values[-1] and i == len(values) - 1:
-                        line += "█ "  # Current value
-                    else:
-                        line += "▓ "  # Historical value above threshold
-                else:
-                    line += "  "  # Below threshold
-
-            # Add temperature label on right
-            if row == 0:
-                line += f" {max_temp:.0f}°F"
-            elif row == height - 1:
-                line += f" {min_temp:.0f}°F"
-            elif row == height // 2:
-                mid_temp = (max_temp + min_temp) / 2
-                line += f" {mid_temp:.0f}°F"
-
-            lines.append(line)
-
-        lines.append("  " + "─" * chart_width)
-
-        # Time labels (oldest ... newest)
-        oldest = timestamps[0].strftime("%H:%M")
-        newest = timestamps[-1].strftime("%H:%M")
-        time_label = f"  {oldest}" + " " * (chart_width - len(oldest) - len(newest)) + newest
-        lines.append(time_label)
-
-        return "\n".join(lines)
+        """Create text-based temperature chart. Delegates to APRSFormatters."""
+        return APRSFormatters._format_temperature_chart(weather_history, width)
 
     def _format_wind_rose(
         self, weather_history: List[APRSWeather]
     ) -> str:
-        """Create a text-based wind rose from weather history.
-
-        Args:
-            weather_history: List of weather reports
-
-        Returns:
-            ASCII art wind rose showing wind direction distribution
-        """
-        if not weather_history:
-            return "  No wind data available"
-
-        # Filter to reports with wind data
-        winds = [
-            (wx.wind_direction, wx.wind_speed)
-            for wx in weather_history
-            if wx.wind_direction is not None and wx.wind_speed is not None
-        ]
-
-        if not winds:
-            return "  No wind data available"
-
-        # Count wind directions in 8 sectors (N, NE, E, SE, S, SW, W, NW)
-        sectors = {
-            "N": 0,
-            "NE": 0,
-            "E": 0,
-            "SE": 0,
-            "S": 0,
-            "SW": 0,
-            "W": 0,
-            "NW": 0,
-        }
-        sector_speeds = {k: [] for k in sectors.keys()}
-
-        # Map directions to sectors
-        for direction, speed in winds:
-            # Convert to 8 sectors (0° = N, 45° = NE, etc.)
-            sector_index = int((direction + 22.5) / 45) % 8
-            sector_names = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
-            sector = sector_names[sector_index]
-            sectors[sector] += 1
-            sector_speeds[sector].append(speed)
-
-        # Calculate average speed per sector
-        avg_speeds = {}
-        for sector, speeds in sector_speeds.items():
-            avg_speeds[sector] = sum(speeds) / len(speeds) if speeds else 0
-
-        # Find max count for scaling
-        max_count = max(sectors.values()) if sectors.values() else 1
-        scale = 5  # Max bar length
-
-        # Build wind rose
-        lines = []
-        lines.append(
-            f"  Wind Rose ({len(winds)} samples, avg {sum(s for _, s in winds) / len(winds):.1f} mph)"
-        )
-        lines.append("  " + "─" * 30)
-
-        # Create rose pattern
-        #        N
-        #     NW   NE
-        #   W         E
-        #     SW   SE
-        #        S
-
-        n_bar = "█" * int(sectors["N"] / max_count * scale)
-        ne_bar = "█" * int(sectors["NE"] / max_count * scale)
-        e_bar = "█" * int(sectors["E"] / max_count * scale)
-        se_bar = "█" * int(sectors["SE"] / max_count * scale)
-        s_bar = "█" * int(sectors["S"] / max_count * scale)
-        sw_bar = "█" * int(sectors["SW"] / max_count * scale)
-        w_bar = "█" * int(sectors["W"] / max_count * scale)
-        nw_bar = "█" * int(sectors["NW"] / max_count * scale)
-
-        # Format as rose
-        lines.append(f"       N {n_bar:>5}  ({sectors['N']:2d}, {avg_speeds['N']:.0f}mph)")
-        lines.append(
-            f"  NW {nw_bar:>5}     {ne_bar:<5} NE  "
-            f"({sectors['NW']},{sectors['NE']})"
-        )
-        lines.append(f"       |       |")
-        lines.append(
-            f"  W {w_bar:>5}  •  {e_bar:<5} E  "
-            f"({sectors['W']},{sectors['E']})"
-        )
-        lines.append(f"       |       |")
-        lines.append(
-            f"  SW {sw_bar:>5}     {se_bar:<5} SE  "
-            f"({sectors['SW']},{sectors['SE']})"
-        )
-        lines.append(f"       S {s_bar:>5}  ({sectors['S']:2d}, {avg_speeds['S']:.0f}mph)")
-
-        lines.append("  " + "─" * 30)
-
-        return "\n".join(lines)
+        """Create text-based wind rose. Delegates to APRSFormatters."""
+        return APRSFormatters._format_wind_rose(weather_history)
 
     def clear_database(self):
         """Clear all APRS database entries (stations, messages, positions, weather).

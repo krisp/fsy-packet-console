@@ -638,6 +638,94 @@ def hex_dump(data: bytes, bytes_per_line: int = 16) -> List[str]:
     return lines
 
 
+class _FrameRenderer:
+    """Encapsulates ANSI/HTML rendering for format_frame_detailed."""
+
+    _ANSI_COLORS = {
+        'green': Colors.GREEN, 'cyan': Colors.CYAN, 'blue': Colors.BLUE,
+        'yellow': Colors.YELLOW, 'red': Colors.RED, 'magenta': Colors.MAGENTA,
+        'gray': Colors.GRAY,
+    }
+
+    def __init__(self, output_format: str):
+        self.fmt = output_format
+        self.lines: list = []
+        self._HTML = None
+        if output_format != 'ansi':
+            from prompt_toolkit import HTML as _H
+            self._HTML = _H
+
+    def separator(self) -> None:
+        """Add bold separator line."""
+        sep = '=' * 80
+        if self.fmt == 'ansi':
+            self.lines.append(f"{Colors.BOLD}{sep}{Colors.RESET}")
+        else:
+            self.lines.append(self._HTML(f"<b>{sep}</b>"))
+
+    def heading(self, text: str) -> None:
+        """Add cyan bold section heading."""
+        if self.fmt == 'ansi':
+            self.lines.append(f"\n{Colors.CYAN}{Colors.BOLD}{text}{Colors.RESET}")
+        else:
+            self.lines.append(self._HTML(f"\n<cyan><b>{text}</b></cyan>"))
+
+    def bold(self, text: str) -> None:
+        """Add bold text line."""
+        if self.fmt == 'ansi':
+            self.lines.append(f"  {Colors.BOLD}{text}{Colors.RESET}")
+        else:
+            self.lines.append(self._HTML(f"  <b>{text}</b>"))
+
+    def colored(self, text: str, color: str) -> None:
+        """Add colored text line."""
+        if self.fmt == 'ansi':
+            c = self._ANSI_COLORS.get(color, '')
+            self.lines.append(f"{c}{text}{Colors.RESET}")
+        else:
+            self.lines.append(self._HTML(f"<{color}>{sanitize_for_xml(text)}</{color}>"))
+
+    def field(self, label: str, value, color: str = None, indent: int = 2) -> None:
+        """Add a labeled field, optionally colored."""
+        pad = ' ' * indent
+        if self.fmt == 'ansi':
+            if color:
+                c = self._ANSI_COLORS.get(color, '')
+                self.lines.append(f"{pad}{label}: {c}{value}{Colors.RESET}")
+            else:
+                self.lines.append(f"{pad}{label}: {value}")
+        else:
+            sv = sanitize_for_xml(str(value))
+            if color:
+                self.lines.append(self._HTML(f"{pad}{label}: <{color}>{sv}</{color}>"))
+            else:
+                self.lines.append(self._HTML(f"{pad}{label}: {sv}"))
+
+    def bold_field(self, label: str, value) -> None:
+        """Add a bold-label field."""
+        if self.fmt == 'ansi':
+            self.lines.append(f"  {Colors.BOLD}{label}:{Colors.RESET} {value}")
+        else:
+            self.lines.append(self._HTML(f"  <b>{label}:</b> {sanitize_for_xml(str(value))}"))
+
+    def text(self, line: str) -> None:
+        """Add plain text line."""
+        if self.fmt == 'ansi':
+            self.lines.append(line)
+        else:
+            self.lines.append(self._HTML(sanitize_for_xml(line)))
+
+    def blank(self) -> None:
+        """Add empty line."""
+        self.lines.append("")
+
+    def result(self) -> Union[str, list]:
+        """Return lines in appropriate format."""
+        if self.fmt == 'ansi':
+            return '\n'.join(self.lines)
+        return self.lines
+
+
 def format_frame_detailed(
     decoded: Dict,
     frame_num: int,
@@ -659,336 +747,237 @@ def format_frame_detailed(
         If output_format='ansi': Single string with ANSI codes
         If output_format='html': List of HTML() objects (for prompt_toolkit)
     """
-    lines = []
-
-    # Calculate byte count
+    r = _FrameRenderer(output_format)
     byte_count = len(decoded['raw']['full_frame']) if 'raw' in decoded and 'full_frame' in decoded['raw'] else 0
 
-    # Format header
+    # Header
+    dir_color = "green" if direction == "TX" else "cyan"
+    r.blank()
+    r.separator()
     if output_format == 'ansi':
-        direction_color = Colors.GREEN if direction == "TX" else Colors.CYAN
-        lines.append("")
-        lines.append(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}")
-        lines.append(f"{Colors.BOLD}Frame {frame_num} [{direction_color}{direction}{Colors.RESET}{Colors.BOLD}]: {timestamp} ({byte_count} bytes){Colors.RESET}")
-        lines.append(f"{Colors.BOLD}{'=' * 80}{Colors.RESET}")
-    else:  # html
-        from prompt_toolkit import HTML
-        direction_color = "green" if direction == "TX" else "cyan"
-        lines.append(HTML(f"<b>{'=' * 80}</b>"))
-        lines.append(HTML(f"<b>Frame {frame_num}: <{direction_color}>{direction}</{direction_color}> {timestamp} ({byte_count} bytes)</b>"))
-        lines.append(HTML(f"<b>{'=' * 80}</b>"))
+        dc = Colors.GREEN if direction == "TX" else Colors.CYAN
+        r.lines.append(f"{Colors.BOLD}Frame {frame_num} [{dc}{direction}{Colors.RESET}{Colors.BOLD}]: {timestamp} ({byte_count} bytes){Colors.RESET}")
+    else:
+        r.lines.append(r._HTML(f"<b>Frame {frame_num}: <{dir_color}>{direction}</{dir_color}> {timestamp} ({byte_count} bytes)</b>"))
+    r.separator()
 
-    # Check for errors
+    # Error check
     if 'error' in decoded:
-        if output_format == 'ansi':
-            lines.append(f"{Colors.RED}ERROR: {decoded['error']}{Colors.RESET}")
-            return '\n'.join(lines)
-        else:
-            from prompt_toolkit import HTML
-            lines.append(HTML(f"<red>ERROR: {decoded['error']}</red>"))
-            return lines
+        r.colored(f"ERROR: {decoded['error']}", 'red')
+        return r.result()
 
     # KISS Layer
-    if output_format == 'ansi':
-        lines.append(f"\n{Colors.CYAN}{Colors.BOLD}KISS Layer{Colors.RESET}")
-        lines.append(f"  Command: 0x{decoded['kiss']['command']:02X} ({decoded['kiss']['command_type']})")
-    else:
-        from prompt_toolkit import HTML
-        lines.append(HTML(f"\n<cyan><b>KISS Layer</b></cyan>"))
-        lines.append(HTML(f"  Command: 0x{decoded['kiss']['command']:02X} ({decoded['kiss']['command_type']})"))
+    r.heading("KISS Layer")
+    kiss = decoded['kiss']
+    r.field("Command", f"0x{kiss['command']:02X} ({kiss['command_type']})")
 
     # AX.25 Layer
-    if output_format == 'ansi':
-        lines.append(f"\n{Colors.CYAN}{Colors.BOLD}AX.25 Layer{Colors.RESET}")
-    else:
-        from prompt_toolkit import HTML
-        lines.append(HTML(f"\n<cyan><b>AX.25 Layer</b></cyan>"))
-
-    # Destination
-    dest = decoded['ax25']['destination']
-    if output_format == 'ansi':
-        lines.append(f"  Destination: {Colors.GREEN}{dest['full']}{Colors.RESET}")
-        lines.append(f"    Callsign: {dest['callsign']}")
-        lines.append(f"    SSID: {dest['ssid']}")
-        lines.append(f"    Command: {dest['command']}")
-    else:
-        from prompt_toolkit import HTML
-        lines.append(HTML(f"  Destination: <green><b>{sanitize_for_xml(dest['full'])}</b></green>"))
-        lines.append(HTML(f"    Callsign: {sanitize_for_xml(dest['callsign'])}, SSID: {dest['ssid']}, Command: {dest['command']}"))
-
-    # Source
-    src = decoded['ax25']['source']
-    if output_format == 'ansi':
-        lines.append(f"  Source: {Colors.GREEN}{src['full']}{Colors.RESET}")
-        lines.append(f"    Callsign: {src['callsign']}")
-        lines.append(f"    SSID: {src['ssid']}")
-        lines.append(f"    Command: {src['command']}")
-    else:
-        from prompt_toolkit import HTML
-        lines.append(HTML(f"  Source: <green><b>{sanitize_for_xml(src['full'])}</b></green>"))
-        lines.append(HTML(f"    Callsign: {sanitize_for_xml(src['callsign'])}, SSID: {src['ssid']}, Command: {src['command']}"))
-
-    # Digipeater path
-    digipeaters = decoded['ax25']['digipeaters']
-    if digipeaters:
-        if output_format == 'ansi':
-            lines.append(f"  Digipeater Path: ({len(digipeaters)} hop{'s' if len(digipeaters) > 1 else ''})")
-            for i, digi in enumerate(digipeaters, 1):
-                repeated_mark = f"{Colors.YELLOW}*{Colors.RESET}" if digi['has_been_repeated'] else ""
-                lines.append(f"    [{i}] {Colors.BLUE}{digi['full']}{repeated_mark}{Colors.RESET}")
-                lines.append(f"        Has been repeated: {digi['has_been_repeated']}")
-        else:
-            from prompt_toolkit import HTML
-            lines.append(HTML(f"  Digipeater Path: ({len(digipeaters)} hop{'s' if len(digipeaters) > 1 else ''})"))
-            for i, digi in enumerate(digipeaters, 1):
-                repeated = "<yellow>*</yellow>" if digi['has_been_repeated'] else ""
-                lines.append(HTML(f"    [{i}] <blue>{sanitize_for_xml(digi['full'])}{repeated}</blue> (repeated: {digi['has_been_repeated']})"))
-    else:
-        if output_format == 'ansi':
-            lines.append(f"  Digipeater Path: (none)")
-        else:
-            from prompt_toolkit import HTML
-            lines.append(HTML(f"  Digipeater Path: (none)"))
-
-    # Control
-    ctrl = decoded['ax25']['control']
-    if output_format == 'ansi':
-        lines.append(f"  Control: 0x{ctrl['raw']:02X} - {Colors.YELLOW}{ctrl['description']}{Colors.RESET}")
-        if ctrl['ns'] is not None:
-            lines.append(f"    N(S): {ctrl['ns']}")
-        if ctrl['nr'] is not None:
-            lines.append(f"    N(R): {ctrl['nr']}")
-        if ctrl['pf'] is not None:
-            lines.append(f"    P/F: {ctrl['pf']}")
-    else:
-        from prompt_toolkit import HTML
-        lines.append(HTML(f"  Control: 0x{ctrl['raw']:02X} - <yellow>{ctrl['description']}</yellow>"))
-        if ctrl['ns'] is not None:
-            lines.append(HTML(f"    N(S): {ctrl['ns']}"))
-        if ctrl['nr'] is not None:
-            lines.append(HTML(f"    N(R): {ctrl['nr']}"))
+    r.heading("AX.25 Layer")
+    _format_ax25_addresses(r, decoded, output_format)
+    _format_ax25_control(r, decoded)
 
     # PID
     if decoded['ax25']['pid']:
         pid = decoded['ax25']['pid']
-        if output_format == 'ansi':
-            lines.append(f"  PID: 0x{pid['value']:02X} ({pid['description']})")
-        else:
-            from prompt_toolkit import HTML
-            lines.append(HTML(f"  PID: 0x{pid['value']:02X} ({pid['description']})"))
+        r.field("PID", f"0x{pid['value']:02X} ({pid['description']})")
 
     # Information field
     if decoded['info']:
-        if output_format == 'ansi':
-            lines.append(f"\n{Colors.CYAN}{Colors.BOLD}Information Field ({decoded['info']['length']} bytes){Colors.RESET}")
-            lines.append(f"  Text: {Colors.MAGENTA}{decoded['info']['text']}{Colors.RESET}")
-        else:
-            from prompt_toolkit import HTML
-            lines.append(HTML(f"\n<cyan><b>Information Field ({decoded['info']['length']} bytes)</b></cyan>"))
-            lines.append(HTML(f"  <magenta>{sanitize_for_xml(decoded['info']['text'])}</magenta>"))
+        r.heading(f"Information Field ({decoded['info']['length']} bytes)")
+        r.field("Text", decoded['info']['text'], 'magenta')
 
     # APRS Layer
     if decoded['aprs']:
-        aprs = decoded['aprs']
-        details = aprs.get('details', {})
+        _format_aprs_layer(r, decoded['aprs'], output_format)
 
-        if output_format == 'ansi':
-            lines.append(f"\n{Colors.CYAN}{Colors.BOLD}APRS Layer{Colors.RESET}")
-            lines.append(f"  Packet Type: {Colors.GREEN}{aprs['type']}{Colors.RESET}")
-        else:
-            from prompt_toolkit import HTML
-            lines.append(HTML(f"\n<cyan><b>APRS Layer</b></cyan>"))
-            lines.append(HTML(f"  Packet Type: <green><b>{sanitize_for_xml(aprs['type'])}</b></green>"))
+    # Hex dumps
+    _format_hex_dumps(r, decoded)
 
-        # ACK/REJ indicators
-        if details.get('is_ack'):
-            if output_format == 'ansi':
-                lines.append(f"  {Colors.RED}>>> ACK MESSAGE <<<{Colors.RESET}")
-            else:
-                from prompt_toolkit import HTML
-                lines.append(HTML(f"  <red><b>&gt;&gt;&gt; ACK MESSAGE &lt;&lt;&lt;</b></red>"))
-        if details.get('is_rej'):
-            if output_format == 'ansi':
-                lines.append(f"  {Colors.RED}>>> REJ MESSAGE <<<{Colors.RESET}")
-            else:
-                from prompt_toolkit import HTML
-                lines.append(HTML(f"  <red><b>&gt;&gt;&gt; REJ MESSAGE &lt;&lt;&lt;</b></red>"))
+    return r.result()
 
-        # MIC-E specific fields
-        if aprs['type'] == 'APRS MIC-E Position' and 'dest_encoded' in details:
-            if output_format == 'ansi':
-                lines.append(f"  {Colors.BOLD}MIC-E Encoded:{Colors.RESET}")
-                lines.append(f"    Destination: {Colors.YELLOW}{details['dest_encoded']}{Colors.RESET} (encodes lat/msg)")
-            else:
-                from prompt_toolkit import HTML
-                lines.append(HTML(f"  <b>MIC-E Encoded:</b>"))
-                lines.append(HTML(f"    Destination: <yellow>{sanitize_for_xml(details['dest_encoded'])}</yellow> (encodes lat/msg)"))
 
-            if 'message_type' in details:
-                if output_format == 'ansi':
-                    lines.append(f"    Message Type: {Colors.GREEN}{details['message_type']}{Colors.RESET}")
-                else:
-                    from prompt_toolkit import HTML
-                    lines.append(HTML(f"    Message Type: <green>{sanitize_for_xml(details['message_type'])}</green>"))
-
-        # Position data
-        if 'latitude' in details and 'longitude' in details:
-            if output_format == 'ansi':
-                lines.append(f"  {Colors.BOLD}Position:{Colors.RESET}")
-                lines.append(f"    Latitude:  {details['latitude']:.6f}°")
-                lines.append(f"    Longitude: {details['longitude']:.6f}°")
-            else:
-                from prompt_toolkit import HTML
-                lines.append(HTML(f"  <b>Position:</b>"))
-                lines.append(HTML(f"    Latitude:  {details['latitude']:.6f}°"))
-                lines.append(HTML(f"    Longitude: {details['longitude']:.6f}°"))
-
-            # Grid square calculation (if available)
-            try:
-                from src.aprs.geo_utils import latlon_to_maidenhead
-                grid = latlon_to_maidenhead(details['latitude'], details['longitude'])
-                if output_format == 'ansi':
-                    lines.append(f"    Grid Square: {Colors.CYAN}{grid}{Colors.RESET}")
-                else:
-                    from prompt_toolkit import HTML
-                    lines.append(HTML(f"    Grid Square: <cyan>{grid}</cyan>"))
-            except Exception:
-                pass
-
-            if 'symbol' in details:
-                if output_format == 'ansi':
-                    lines.append(f"    Symbol: {details['symbol']}")
-                else:
-                    from prompt_toolkit import HTML
-                    lines.append(HTML(f"    Symbol: {sanitize_for_xml(details['symbol'])}"))
-
-            # MIC-E speed and course
-            if 'speed' in details:
-                if output_format == 'ansi':
-                    lines.append(f"    Speed: {Colors.GREEN}{details['speed']} mph{Colors.RESET}")
-                else:
-                    from prompt_toolkit import HTML
-                    lines.append(HTML(f"    Speed: <green>{details['speed']} mph</green>"))
-            if 'course' in details:
-                if output_format == 'ansi':
-                    lines.append(f"    Course: {Colors.GREEN}{details['course']}°{Colors.RESET}")
-                else:
-                    from prompt_toolkit import HTML
-                    lines.append(HTML(f"    Course: <green>{details['course']}°</green>"))
-
-            # Comment (without weather data if present)
-            if 'comment' in details and details['comment']:
-                comment = details['comment']
-                if details.get('has_weather'):
-                    # Strip weather data for cleaner display
-                    comment = re.sub(r'[cstgrhpPb]\d{2,5}', '', comment).strip()
-                if comment:
-                    if output_format == 'ansi':
-                        lines.append(f"    Comment: {comment}")
-                    else:
-                        from prompt_toolkit import HTML
-                        lines.append(HTML(f"    Comment: {sanitize_for_xml(comment)}"))
-
-        # Weather data
-        if details.get('has_weather') or aprs['type'] == 'APRS Weather':
-            wx_lines = []
-            if 'temperature' in details:
-                wx_lines.append(f"    Temperature: {details['temperature']}°F")
-            if 'wind_speed' in details:
-                wind_dir = details.get('wind_dir', 0)
-                wx_lines.append(f"    Wind: {wind_dir}° @ {details['wind_speed']} mph")
-            if 'wind_gust' in details:
-                wx_lines.append(f"    Gust: {details['wind_gust']} mph")
-            if 'humidity' in details:
-                wx_lines.append(f"    Humidity: {details['humidity']}%")
-            if 'pressure' in details:
-                wx_lines.append(f"    Pressure: {details['pressure']:.1f} mbar")
-            if 'rain_1h' in details:
-                wx_lines.append(f"    Rain (1h): {details['rain_1h']:.2f} in")
-            if 'rain_24h' in details:
-                wx_lines.append(f"    Rain (24h): {details['rain_24h']:.2f} in")
-
-            if wx_lines:
-                if output_format == 'ansi':
-                    lines.append(f"  {Colors.BOLD}Weather Data:{Colors.RESET}")
-                    lines.extend(wx_lines)
-                else:
-                    from prompt_toolkit import HTML
-                    lines.append(HTML(f"  <b>Weather Data:</b>"))
-                    for wx_line in wx_lines:
-                        lines.append(HTML(wx_line))
-
-        # Message data
-        if 'to' in details:
-            if output_format == 'ansi':
-                lines.append(f"  {Colors.BOLD}Message To:{Colors.RESET} {details['to']}")
-            else:
-                from prompt_toolkit import HTML
-                lines.append(HTML(f"  <b>Message To:</b> {sanitize_for_xml(details['to'])}"))
-        if 'message' in details:
-            if output_format == 'ansi':
-                lines.append(f"  {Colors.BOLD}Message Text:{Colors.RESET} {details['message']}")
-            else:
-                from prompt_toolkit import HTML
-                lines.append(HTML(f"  <b>Message Text:</b> {sanitize_for_xml(details['message'])}"))
-        if 'message_id' in details and details['message_id']:
-            if output_format == 'ansi':
-                lines.append(f"  {Colors.BOLD}Message ID:{Colors.RESET} {details['message_id']}")
-            else:
-                from prompt_toolkit import HTML
-                lines.append(HTML(f"  <b>Message ID:</b> {sanitize_for_xml(details['message_id'])}"))
-
-        # Status
-        if 'status' in details:
-            if output_format == 'ansi':
-                lines.append(f"  {Colors.BOLD}Status:{Colors.RESET} {details['status']}")
-            else:
-                from prompt_toolkit import HTML
-                lines.append(HTML(f"  <b>Status:</b> {sanitize_for_xml(details['status'])}"))
-
-        # Other APRS fields (object, item, telemetry, etc.)
-        skip_keys = {
-            'is_ack', 'is_rej', 'latitude', 'longitude', 'symbol', 'comment',
-            'has_weather', 'temperature', 'wind_dir', 'wind_speed', 'wind_gust',
-            'humidity', 'pressure', 'rain_1h', 'rain_24h', 'to', 'message',
-            'message_id', 'status', 'speed', 'course', 'message_type',
-            'dest_encoded', 'format', 'decode_error'
-        }
-        for key, value in details.items():
-            if key not in skip_keys and value is not None:
-                if output_format == 'ansi':
-                    lines.append(f"  {key.capitalize()}: {value}")
-                else:
-                    from prompt_toolkit import HTML
-                    lines.append(HTML(f"  {key.capitalize()}: {sanitize_for_xml(str(value))}"))
-
-    # Hex dump
-    if 'raw' in decoded and 'ax25_payload' in decoded['raw']:
-        if output_format == 'ansi':
-            lines.append(f"\n{Colors.CYAN}{Colors.BOLD}Hex Dump (AX.25 Payload){Colors.RESET}")
-        else:
-            from prompt_toolkit import HTML
-            lines.append(HTML(f"\n<cyan><b>Hex Dump (AX.25 Payload)</b></cyan>"))
-
-        hex_lines = hex_dump(decoded['raw']['ax25_payload'])
-        if output_format == 'ansi':
-            lines.extend(hex_lines)
-        else:
-            from prompt_toolkit import HTML
-            for hex_line in hex_lines:
-                lines.append(HTML(sanitize_for_xml(hex_line)))
-
-    # Full frame hex dump
-    if 'raw' in decoded and 'full_frame' in decoded['raw']:
-        if output_format == 'ansi':
-            lines.append(f"\n{Colors.GRAY}Full KISS Frame (hex):{Colors.RESET}")
-            lines.append(f"{Colors.GRAY}  {decoded['raw']['full_frame'].hex()}{Colors.RESET}")
-        else:
-            from prompt_toolkit import HTML
-            lines.append(HTML(f"\n<gray>Full KISS Frame (hex): {decoded['raw']['full_frame'].hex()}</gray>"))
-
-    # Return format
+def _format_ax25_addresses(r: _FrameRenderer, decoded: Dict, output_format: str) -> None:
+    """Format AX.25 destination, source, and digipeater path."""
+    # Destination
+    dest = decoded['ax25']['destination']
     if output_format == 'ansi':
-        return '\n'.join(lines)
+        r.field("Destination", dest['full'], 'green')
+        r.field("Callsign", dest['callsign'], indent=4)
+        r.field("SSID", dest['ssid'], indent=4)
+        r.field("Command", dest['command'], indent=4)
     else:
-        return lines
+        r.field("Destination", dest['full'], 'green')
+        r.lines.append(r._HTML(
+            f"    Callsign: {sanitize_for_xml(dest['callsign'])}, "
+            f"SSID: {dest['ssid']}, Command: {dest['command']}"
+        ))
+
+    # Source
+    src = decoded['ax25']['source']
+    if output_format == 'ansi':
+        r.field("Source", src['full'], 'green')
+        r.field("Callsign", src['callsign'], indent=4)
+        r.field("SSID", src['ssid'], indent=4)
+        r.field("Command", src['command'], indent=4)
+    else:
+        r.field("Source", src['full'], 'green')
+        r.lines.append(r._HTML(
+            f"    Callsign: {sanitize_for_xml(src['callsign'])}, "
+            f"SSID: {src['ssid']}, Command: {src['command']}"
+        ))
+
+    # Digipeater path
+    digipeaters = decoded['ax25']['digipeaters']
+    if digipeaters:
+        hop_s = 's' if len(digipeaters) > 1 else ''
+        r.field("Digipeater Path", f"({len(digipeaters)} hop{hop_s})")
+        for i, digi in enumerate(digipeaters, 1):
+            if output_format == 'ansi':
+                mark = f"{Colors.YELLOW}*{Colors.RESET}" if digi['has_been_repeated'] else ""
+                r.lines.append(f"    [{i}] {Colors.BLUE}{digi['full']}{mark}{Colors.RESET}")
+                r.lines.append(f"        Has been repeated: {digi['has_been_repeated']}")
+            else:
+                rep = "<yellow>*</yellow>" if digi['has_been_repeated'] else ""
+                r.lines.append(r._HTML(
+                    f"    [{i}] <blue>{sanitize_for_xml(digi['full'])}{rep}</blue>"
+                    f" (repeated: {digi['has_been_repeated']})"
+                ))
+    else:
+        r.field("Digipeater Path", "(none)")
+
+
+def _format_ax25_control(r: _FrameRenderer, decoded: Dict) -> None:
+    """Format AX.25 control byte fields."""
+    ctrl = decoded['ax25']['control']
+    r.field("Control", f"0x{ctrl['raw']:02X} - {ctrl['description']}", 'yellow')
+    if ctrl['ns'] is not None:
+        r.field("N(S)", ctrl['ns'], indent=4)
+    if ctrl['nr'] is not None:
+        r.field("N(R)", ctrl['nr'], indent=4)
+    if r.fmt == 'ansi' and ctrl['pf'] is not None:
+        r.field("P/F", ctrl['pf'], indent=4)
+
+
+def _format_aprs_layer(r: _FrameRenderer, aprs: Dict, output_format: str) -> None:
+    """Format APRS protocol layer details."""
+    details = aprs.get('details', {})
+    r.heading("APRS Layer")
+    r.field("Packet Type", aprs['type'], 'green')
+
+    # ACK/REJ indicators
+    for flag, label in [('is_ack', 'ACK'), ('is_rej', 'REJ')]:
+        if details.get(flag):
+            if output_format == 'ansi':
+                r.lines.append(f"  {Colors.RED}>>> {label} MESSAGE <<<{Colors.RESET}")
+            else:
+                r.lines.append(r._HTML(
+                    f"  <red><b>&gt;&gt;&gt; {label} MESSAGE &lt;&lt;&lt;</b></red>"
+                ))
+
+    # MIC-E specific fields
+    if aprs['type'] == 'APRS MIC-E Position' and 'dest_encoded' in details:
+        r.bold("MIC-E Encoded:")
+        r.field("Destination", f"{details['dest_encoded']} (encodes lat/msg)", 'yellow', indent=4)
+        if 'message_type' in details:
+            r.field("Message Type", details['message_type'], 'green', indent=4)
+
+    # Position data
+    if 'latitude' in details and 'longitude' in details:
+        _format_position(r, details)
+
+    # Weather data
+    if details.get('has_weather') or aprs['type'] == 'APRS Weather':
+        _format_weather(r, details)
+
+    # Message data
+    for key, label in [('to', 'Message To'), ('message', 'Message Text'), ('message_id', 'Message ID')]:
+        if key in details and details[key]:
+            r.bold_field(label, details[key])
+
+    # Status
+    if 'status' in details:
+        r.bold_field("Status", details['status'])
+
+    # Remaining APRS fields
+    skip_keys = {
+        'is_ack', 'is_rej', 'latitude', 'longitude', 'symbol', 'comment',
+        'has_weather', 'temperature', 'wind_dir', 'wind_speed', 'wind_gust',
+        'humidity', 'pressure', 'rain_1h', 'rain_24h', 'to', 'message',
+        'message_id', 'status', 'speed', 'course', 'message_type',
+        'dest_encoded', 'format', 'decode_error'
+    }
+    for key, value in details.items():
+        if key not in skip_keys and value is not None:
+            r.field(key.capitalize(), value)
+
+
+def _format_position(r: _FrameRenderer, details: Dict) -> None:
+    """Format APRS position fields."""
+    r.bold("Position:")
+    r.field("Latitude", f"{details['latitude']:.6f}°", indent=4)
+    r.field("Longitude", f"{details['longitude']:.6f}°", indent=4)
+
+    try:
+        from src.aprs.geo_utils import latlon_to_maidenhead
+        grid = latlon_to_maidenhead(details['latitude'], details['longitude'])
+        r.field("Grid Square", grid, 'cyan', indent=4)
+    except Exception:
+        pass
+
+    if 'symbol' in details:
+        r.field("Symbol", details['symbol'], indent=4)
+    if 'speed' in details:
+        r.field("Speed", f"{details['speed']} mph", 'green', indent=4)
+    if 'course' in details:
+        r.field("Course", f"{details['course']}°", 'green', indent=4)
+
+    if 'comment' in details and details['comment']:
+        comment = details['comment']
+        if details.get('has_weather'):
+            comment = re.sub(r'[cstgrhpPb]\d{2,5}', '', comment).strip()
+        if comment:
+            r.field("Comment", comment, indent=4)
+
+
+def _format_weather(r: _FrameRenderer, details: Dict) -> None:
+    """Format APRS weather data fields."""
+    wx_fields = [
+        ('temperature', 'Temperature', '°F'),
+        ('wind_speed', 'Wind', None),
+        ('wind_gust', 'Gust', ' mph'),
+        ('humidity', 'Humidity', '%'),
+        ('pressure', 'Pressure', None),
+        ('rain_1h', 'Rain (1h)', None),
+        ('rain_24h', 'Rain (24h)', None),
+    ]
+    wx_lines = []
+    for key, label, suffix in wx_fields:
+        if key not in details:
+            continue
+        val = details[key]
+        if key == 'wind_speed':
+            wind_dir = details.get('wind_dir', 0)
+            wx_lines.append(f"    Wind: {wind_dir}° @ {val} mph")
+        elif key == 'pressure':
+            wx_lines.append(f"    {label}: {val:.1f} mbar")
+        elif key in ('rain_1h', 'rain_24h'):
+            wx_lines.append(f"    {label}: {val:.2f} in")
+        else:
+            wx_lines.append(f"    {label}: {val}{suffix}")
+
+    if wx_lines:
+        r.bold("Weather Data:")
+        for line in wx_lines:
+            r.text(line)
+
+
+def _format_hex_dumps(r: _FrameRenderer, decoded: Dict) -> None:
+    """Format hex dump sections."""
+    if 'raw' in decoded and 'ax25_payload' in decoded['raw']:
+        r.heading("Hex Dump (AX.25 Payload)")
+        for line in hex_dump(decoded['raw']['ax25_payload']):
+            r.text(line)
+
+    if 'raw' in decoded and 'full_frame' in decoded['raw']:
+        hex_str = decoded['raw']['full_frame'].hex()
+        r.colored(f"\nFull KISS Frame (hex): {hex_str}", 'gray')

@@ -3,6 +3,7 @@
  */
 
 import { APRSApi } from './api.js';
+import { formatRelativeTime, escapeHtml } from './utils.js';
 
 let api = new APRSApi();
 let stationsData = [];
@@ -341,7 +342,7 @@ function renderTable() {
         const dist = getStationDistance(station);
         const distance = dist !== null ? `${dist.toFixed(1)} mi` : '—';
         const device = escapeHtml(station.device || '—');
-        const lastHeard = formatTimestamp(station.last_heard);
+        const lastHeard = formatRelativeTime(station.last_heard);
         const packets = station.packets_heard || 0;
         const hops = station.hop_count !== undefined ? station.hop_count : '—';
         const direct = station.heard_direct ? '✓' : '—';
@@ -393,41 +394,6 @@ function updateTableInfo() {
     }
 
     document.getElementById('table-info').textContent = info;
-}
-
-/**
- * Format timestamp for display
- */
-function formatTimestamp(timestamp) {
-    if (!timestamp) return '—';
-
-    const date = new Date(timestamp);
-    const now = new Date();
-    const diffMs = now - date;
-    const diffMins = Math.floor(diffMs / 60000);
-    const diffHours = Math.floor(diffMs / 3600000);
-    const diffDays = Math.floor(diffMs / 86400000);
-
-    if (diffMins < 1) return 'Just now';
-    if (diffMins < 60) return `${diffMins}m ago`;
-    if (diffHours < 24) return `${diffHours}h ago`;
-    if (diffDays < 7) return `${diffDays}d ago`;
-
-    // Older than a week, show date
-    const month = date.getMonth() + 1;
-    const day = date.getDate();
-    const hours = date.getHours().toString().padStart(2, '0');
-    const mins = date.getMinutes().toString().padStart(2, '0');
-    return `${month}/${day} ${hours}:${mins}`;
-}
-
-/**
- * Escape HTML to prevent XSS
- */
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
 }
 
 /**

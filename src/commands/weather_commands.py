@@ -5,7 +5,7 @@ Handles configuration of weather station integration for APRS beaconing.
 """
 
 from .base import CommandHandler, command
-from src.utils import print_pt, print_info, print_error
+from src.utils import print_pt, print_info, print_error, print_header
 from src.weather_manager import WeatherStationManager
 
 
@@ -212,7 +212,6 @@ class WeatherCommandHandler(CommandHandler):
             # Show status
             status = self.weather_manager.get_status()
 
-            from src.utils import print_header
             print_header("Personal Weather Station Status")
             print_pt(f"Enabled: {status['enabled']}")
             print_pt(f"Configured: {status['configured']}")
@@ -251,7 +250,6 @@ class WeatherCommandHandler(CommandHandler):
                 print_info("Use 'pws fetch' to get fresh data")
                 return
 
-            from src.utils import print_header
             print_header("Current Weather")
 
             if data.temperature_outdoor is not None:

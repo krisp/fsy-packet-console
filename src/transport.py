@@ -5,13 +5,10 @@ Provides a unified interface for both BLE (UV-50PRO) and serial KISS TNCs.
 """
 
 import asyncio
-import logging
 from abc import ABC, abstractmethod
 from typing import Optional, Callable, Any
 from src.constants import TNC_TX_UUID, TNC_RX_UUID, TNC_COMMAND_UUID, TNC_INDICATION_UUID
 from src.utils import print_info, print_debug, print_warning, print_error
-
-logger = logging.getLogger(__name__)
 
 
 class TransportBase(ABC):
@@ -62,6 +59,86 @@ class TransportBase(ABC):
     async def close(self) -> None:
         """Close the transport connection."""
         pass
+
+
+class StreamTransportBase(TransportBase):
+    """Shared base for transports using asyncio reader/writer streams.
+
+    Provides common _read_loop, write_kiss_frame, send_tnc_data, and close
+    implementations for SerialTransport and TCPTransport.
+    """
+
+    _transport_name: str = "Stream"  # Override in subclasses
+
+    def __init__(self, tnc_queue: asyncio.Queue):
+        super().__init__()
+        self.tnc_queue = tnc_queue
+        self.reader: Optional[asyncio.StreamReader] = None
+        self.writer: Optional[asyncio.StreamWriter] = None
+        self._read_task: Optional[asyncio.Task] = None
+
+    async def _read_loop(self) -> None:
+        """Background task to read from stream and push to TNC queue."""
+        print_info(f"{self._transport_name} read loop started")
+        try:
+            while self._connected and self.reader:
+                try:
+                    data = await self.reader.read(1024)
+                    if not data:
+                        print_warning(f"{self._transport_name} connection closed")
+                        self._connected = False
+                        break
+                    await self.tnc_queue.put(data)
+                except asyncio.CancelledError:
+                    print_info(f"{self._transport_name} read loop cancelled")
+                    break
+                except Exception as e:
+                    print_error(f"{self._transport_name} read error: {e}")
+                    await asyncio.sleep(1)
+        finally:
+            print_info(f"{self._transport_name} read loop stopped")
+
+    async def write_kiss_frame(self, data: bytes, response: bool = True) -> bool:
+        """Write KISS frame to stream (response param ignored for stream transports)."""
+        try:
+            if not self._connected or not self.writer:
+                print_error(f"{self._transport_name} not connected")
+                return False
+            self.writer.write(data)
+            await self.writer.drain()
+            return True
+        except Exception as e:
+            print_error(f"{self._transport_name} write error: {e}")
+            self._connected = False
+            return False
+
+    async def send_tnc_data(self, data: bytes) -> None:
+        """Send raw data to TNC stream."""
+        if self._connected and self.writer:
+            try:
+                self.writer.write(data)
+                await self.writer.drain()
+            except Exception as e:
+                print_error(f"{self._transport_name} send error: {e}")
+                self._connected = False
+
+    async def close(self) -> None:
+        """Close stream transport."""
+        self._connected = False
+        if self._read_task:
+            self._read_task.cancel()
+            try:
+                await self._read_task
+            except asyncio.CancelledError:
+                pass
+        if self.writer:
+            try:
+                self.writer.close()
+                await self.writer.wait_closed()
+            except Exception:
+                pass
+        self.reader = None
+        self.writer = None
 
 
 class BLETransport(TransportBase):
@@ -160,34 +237,6 @@ class BLETransport(TransportBase):
             print_error(f"Command error: {e}")
             return None
 
-    async def get_status(self) -> Optional[dict]:
-        """Get radio status (BLE-specific)."""
-        response = await self.send_command(5)  # GET_RADIO_STATUS
-        if response and len(response) >= 6:
-            return {
-                'battery': response[0],
-                'rssi': response[1],
-                'channel': response[2],
-                'power': response[3],
-                'squelch': response[4],
-                'volume': response[5]
-            }
-        return None
-
-    async def get_gps_position(self) -> Optional[dict]:
-        """Get GPS position (BLE-specific)."""
-        response = await self.send_command(7)  # GET_GPS_POSITION
-        if response and len(response) >= 12:
-            lat = int.from_bytes(response[0:4], 'little', signed=True) / 1e7
-            lon = int.from_bytes(response[4:8], 'little', signed=True) / 1e7
-            alt = int.from_bytes(response[8:10], 'little', signed=True)
-            return {
-                'latitude': lat,
-                'longitude': lon,
-                'altitude': alt
-            }
-        return None
-
     def handle_indication(self, sender, data: bytearray) -> None:
         """Handle BLE indication responses."""
         self._last_response = bytes(data)
@@ -207,10 +256,11 @@ class BLETransport(TransportBase):
         self._connected = False
 
 
-class SerialTransport(TransportBase):
+class SerialTransport(StreamTransportBase):
     """Serial port transport for external KISS TNCs."""
 
     VALID_BAUD_RATES = [1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200]
+    _transport_name = "Serial"
 
     def __init__(self, port: str, baud: int, tnc_queue: asyncio.Queue):
         """
@@ -221,13 +271,9 @@ class SerialTransport(TransportBase):
             baud: Baud rate (9600, 19200, etc.)
             tnc_queue: Queue for TNC data
         """
-        super().__init__()
+        super().__init__(tnc_queue)
         self.port = port
         self.baud = baud
-        self.tnc_queue = tnc_queue
-        self.reader: Optional[asyncio.StreamReader] = None
-        self.writer: Optional[asyncio.StreamWriter] = None
-        self._read_task: Optional[asyncio.Task] = None
 
         # Validate baud rate
         if baud not in self.VALID_BAUD_RATES:
@@ -310,6 +356,7 @@ class SerialTransport(TransportBase):
 
         print_info("Checking if TNC needs KISS mode initialization...")
 
+        read_task_was_running = False
         try:
             # Pause the read loop temporarily to avoid queue interference
             # We'll read responses directly during initialization
@@ -421,90 +468,16 @@ class SerialTransport(TransportBase):
                     pass
             return False
 
-    async def _read_loop(self) -> None:
-        """Background task to read from serial port and push to TNC queue."""
-        print_info("Serial read loop started")
-
-        try:
-            while self._connected and self.reader:
-                try:
-                    # Read data from serial port
-                    data = await self.reader.read(1024)
-
-                    if not data:
-                        # EOF or disconnect
-                        print_warning("Serial port disconnected")
-                        self._connected = False
-                        break
-
-                    # Push to TNC queue for processing
-                    await self.tnc_queue.put(data)
-
-                except asyncio.CancelledError:
-                    print_info("Serial read loop cancelled")
-                    break
-                except Exception as e:
-                    print_error(f"Serial read error: {e}")
-                    await asyncio.sleep(1)  # Avoid tight loop on errors
-
-        finally:
-            print_info("Serial read loop stopped")
-
-    async def write_kiss_frame(self, data: bytes, response: bool = True) -> bool:
-        """
-        Write KISS frame to serial port.
-
-        Note: Serial mode ignores the 'response' parameter since serial
-        doesn't have the same request/response semantics as BLE.
-        """
-        try:
-            if not self._connected or not self.writer:
-                print_error("Serial port not connected")
-                return False
-
-            # Write data
-            self.writer.write(data)
-            await self.writer.drain()
-
-            return True
-
-        except Exception as e:
-            print_error(f"Serial write error: {e}")
-            self._connected = False
-            return False
-
-    async def send_tnc_data(self, data: bytes) -> None:
-        """Send raw data to serial TNC."""
-        if self._connected and self.writer:
-            try:
-                self.writer.write(data)
-                await self.writer.drain()
-            except Exception as e:
-                print_error(f"Serial send error: {e}")
-                self._connected = False
-
     async def close(self) -> None:
         """Close serial port."""
-        self._connected = False
-
-        # Cancel read task
-        if self._read_task:
-            self._read_task.cancel()
-            try:
-                await self._read_task
-            except asyncio.CancelledError:
-                pass
-
-        # Close writer
-        if self.writer:
-            self.writer.close()
-            await self.writer.wait_closed()
-
+        await super().close()
         print_info(f"Serial port closed: {self.port}")
 
 
-class TCPTransport(TransportBase):
+class TCPTransport(StreamTransportBase):
     """KISS-over-TCP client transport for external TNCs like Direwolf."""
+
+    _transport_name = "TCP"
 
     def __init__(self, host: str, port: int, tnc_queue: asyncio.Queue):
         """
@@ -515,13 +488,9 @@ class TCPTransport(TransportBase):
             port: TCP port number (typically 8001 for Direwolf)
             tnc_queue: Queue for received TNC data
         """
-        super().__init__()
+        super().__init__(tnc_queue)
         self.host = host
         self.port = port
-        self.tnc_queue = tnc_queue
-        self.reader: Optional[asyncio.StreamReader] = None
-        self.writer: Optional[asyncio.StreamWriter] = None
-        self._read_task: Optional[asyncio.Task] = None
 
     async def connect(self) -> bool:
         """
@@ -556,96 +525,7 @@ class TCPTransport(TransportBase):
             print_error(f"TCP connection error: {e}")
             return False
 
-    async def _read_loop(self) -> None:
-        """Background task to read data from TCP socket."""
-        print_info("TCP read loop started")
-
-        try:
-            while self._connected and self.reader:
-                try:
-                    # Read data from TCP socket
-                    data = await self.reader.read(1024)
-
-                    if not data:
-                        # EOF - connection closed by remote
-                        print_warning("TCP connection closed by remote TNC")
-                        self._connected = False
-                        break
-
-                    # Push to TNC queue for processing
-                    await self.tnc_queue.put(data)
-
-                except asyncio.CancelledError:
-                    print_info("TCP read loop cancelled")
-                    break
-                except Exception as e:
-                    print_error(f"TCP read error: {e}")
-                    await asyncio.sleep(1)  # Avoid tight loop on errors
-
-        finally:
-            print_info("TCP read loop stopped")
-
-    async def write_kiss_frame(self, data: bytes, response: bool = True) -> bool:
-        """
-        Write KISS frame to remote TNC.
-
-        Note: TCP mode ignores the 'response' parameter since TCP
-        doesn't have the same request/response semantics as BLE.
-
-        Args:
-            data: KISS frame data to send
-            response: Ignored for TCP (no response mechanism)
-
-        Returns:
-            True if sent successfully, False otherwise
-        """
-        try:
-            if not self._connected or not self.writer:
-                print_error("TCP connection not active")
-                return False
-
-            # Write data
-            self.writer.write(data)
-            await self.writer.drain()
-
-            return True
-
-        except Exception as e:
-            print_error(f"TCP write error: {e}")
-            self._connected = False
-            return False
-
-    async def send_tnc_data(self, data: bytes) -> None:
-        """Send raw data to TCP TNC."""
-        if self._connected and self.writer:
-            try:
-                self.writer.write(data)
-                await self.writer.drain()
-            except Exception as e:
-                print_error(f"TCP send error: {e}")
-                self._connected = False
-
     async def close(self) -> None:
         """Close TCP connection."""
-        self._connected = False
-
-        # Cancel read task
-        if self._read_task:
-            self._read_task.cancel()
-            try:
-                await self._read_task
-            except asyncio.CancelledError:
-                pass
-
-        # Close writer
-        if self.writer:
-            try:
-                self.writer.close()
-                await self.writer.wait_closed()
-            except Exception:
-                pass
-
-        self.reader = None
-        self.writer = None
-
+        await super().close()
         print_info(f"TCP connection closed: {self.host}:{self.port}")

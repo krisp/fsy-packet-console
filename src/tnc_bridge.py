@@ -3,6 +3,7 @@ UV-50PRO TNC TCP Bridge
 """
 
 import asyncio
+import socket
 from src.utils import print_info, print_error, print_debug
 from src.constants import TNC_TCP_PORT
 from src.protocol import kiss_unwrap
@@ -62,8 +63,6 @@ class TNCBridge:
                 if transport and hasattr(transport, "get_extra_info"):
                     sock = transport.get_extra_info("socket")
                     if sock:
-                        import socket
-
                         # Set SO_LINGER to (1, 0) to send RST instead of FIN
                         # This forcefully resets the connection - client WILL notice!
                         try:
@@ -294,8 +293,6 @@ class TNCBridge:
                 if transport and hasattr(transport, "get_extra_info"):
                     sock = transport.get_extra_info("socket")
                     if sock:
-                        import socket
-
                         # Set SO_LINGER to (1, 0) for hard RST reset
                         try:
                             sock.setsockopt(

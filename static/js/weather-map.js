@@ -5,6 +5,8 @@
  * with wind barbs, temperature/dew point displays, and pressure information.
  */
 
+import { createBaseLayers, SSEManager } from './utils.js';
+
 /**
  * StationModelRenderer - Handles canvas drawing of meteorological station models
  */
@@ -384,37 +386,14 @@ class WeatherMapApp {
             zoomControl: true
         });
 
-        // Add tile layers (using same providers as main map)
-        const streetMap = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-            maxZoom: 19
-        });
-
-        const topoMap = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
-            attribution: 'Map data: © OpenStreetMap contributors, SRTM | Map style: © OpenTopoMap (CC-BY-SA)',
-            maxZoom: 17
-        });
-
-        const terrainMap = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', {
-            attribution: 'Tiles © Esri &mdash; Source: Esri, DeLorme, NAVTEQ, TomTom, Intermap, iPC, USGS, FAO, NPS, NRCAN, GeoBase, Kadaster NL, Ordnance Survey, Esri Japan, METI, Esri China (Hong Kong), and the GIS User Community',
-            maxZoom: 18
-        });
-
-        const satelliteMap = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-            attribution: 'Tiles © Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community',
-            maxZoom: 18
-        });
+        // Base tile layers from shared utils
+        const { layers: baseLayers } = createBaseLayers();
 
         // Add default layer (Terrain)
-        terrainMap.addTo(this.map);
+        baseLayers['Terrain'].addTo(this.map);
 
         // Add layer control
-        L.control.layers({
-            'Street': streetMap,
-            'Terrain': terrainMap,
-            'Topographic': topoMap,
-            'Satellite': satelliteMap
-        }, {}, {
+        L.control.layers(baseLayers, {}, {
             position: 'topleft',
             collapsed: false
         }).addTo(this.map);
@@ -1103,72 +1082,62 @@ class WeatherMapApp {
      * Setup Server-Sent Events for real-time updates
      */
     setupSSE() {
-        this.eventSource = new EventSource('/api/events');
+        const statusEl = document.getElementById('connection-status');
 
-        this.eventSource.addEventListener('weather_update', (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                const callsign = data.callsign;
+        this.sseManager = new SSEManager('/api/events', {
+            listeners: {
+                weather_update: (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        const callsign = data.callsign;
 
-                // Find and update station
-                const station = this.weatherStations.find(s => s.callsign === callsign);
-                if (station && data.weather) {
-                    station.weather = data.weather;
+                        // Find and update station
+                        const station = this.weatherStations.find(s => s.callsign === callsign);
+                        if (station && data.weather) {
+                            station.weather = data.weather;
 
-                    // Update position if provided
-                    if (data.position) {
-                        station.latitude = data.position.latitude;
-                        station.longitude = data.position.longitude;
+                            // Update position if provided
+                            if (data.position) {
+                                station.latitude = data.position.latitude;
+                                station.longitude = data.position.longitude;
+                            }
+
+                            this.redraw();
+                        } else if (!station && data.weather && data.position) {
+                            // New weather station
+                            this.weatherStations.push({
+                                callsign: callsign,
+                                latitude: data.position.latitude,
+                                longitude: data.position.longitude,
+                                weather: data.weather,
+                                fullData: data
+                            });
+
+                            // Update count
+                            const stationCount = document.getElementById('station-count');
+                            if (stationCount) {
+                                stationCount.textContent = `${this.weatherStations.length} Weather Stations`;
+                            }
+
+                            this.redraw();
+                        }
+                    } catch (error) {
+                        console.error('Error processing weather update:', error);
                     }
-
-                    this.redraw();
-                } else if (!station && data.weather && data.position) {
-                    // New weather station
-                    this.weatherStations.push({
-                        callsign: callsign,
-                        latitude: data.position.latitude,
-                        longitude: data.position.longitude,
-                        weather: data.weather,
-                        fullData: data  // Store available data
-                    });
-
-                    // Update count
-                    const stationCount = document.getElementById('station-count');
-                    if (stationCount) {
-                        stationCount.textContent = `${this.weatherStations.length} Weather Stations`;
-                    }
-
-                    this.redraw();
+                },
+            },
+            onConnected: () => {
+                if (statusEl) {
+                    statusEl.textContent = 'Connected';
+                    statusEl.className = 'status-item status-connected';
                 }
-            } catch (error) {
-                console.error('Error processing weather update:', error);
-            }
-        });
-
-        this.eventSource.addEventListener('error', (event) => {
-            console.error('SSE connection error:', event);
-            const statusEl = document.getElementById('connection-status');
-            if (statusEl) {
-                statusEl.textContent = 'Disconnected';
-                statusEl.className = 'status-item status-disconnected';
-            }
-
-            // Attempt reconnection after 5 seconds
-            setTimeout(() => {
-                if (this.eventSource.readyState === EventSource.CLOSED) {
-                    console.log('Attempting to reconnect SSE...');
-                    this.setupSSE();
+            },
+            onDisconnected: () => {
+                if (statusEl) {
+                    statusEl.textContent = 'Disconnected';
+                    statusEl.className = 'status-item status-disconnected';
                 }
-            }, 5000);
-        });
-
-        this.eventSource.addEventListener('open', () => {
-            console.log('SSE connection established');
-            const statusEl = document.getElementById('connection-status');
-            if (statusEl) {
-                statusEl.textContent = 'Connected';
-                statusEl.className = 'status-item status-connected';
-            }
+            },
         });
     }
 }

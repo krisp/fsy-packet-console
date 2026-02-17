@@ -37,27 +37,6 @@ class WeatherStationManager:
             'default_port': 80,
             'description': 'Ecowitt GW1000/GW1100/GW2000 Gateway'
         },
-        # Future backends:
-        # 'davis': {
-        #     'name': 'Davis WeatherLink',
-        #     'class': DavisWeatherStation,
-        #     'connection_type': 'http',
-        #     'default_port': 80,
-        #     'description': 'Davis WeatherLink Live/IP'
-        # },
-        # 'ambient': {
-        #     'name': 'Ambient Weather',
-        #     'class': AmbientWeatherStation,
-        #     'connection_type': 'http',
-        #     'default_port': 80,
-        #     'description': 'Ambient Weather Network Station'
-        # },
-        # 'davis_serial': {
-        #     'name': 'Davis Serial',
-        #     'class': DavisSerialWeatherStation,
-        #     'connection_type': 'serial',
-        #     'description': 'Davis Vantage Pro/Pro2 (RS232/USB)'
-        # },
     }
 
     def __init__(self):

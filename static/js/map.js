@@ -2,6 +2,8 @@
  * APRS Map - Leaflet integration for station mapping
  */
 
+import { formatRelativeTime as _formatRelativeTime, isValidPosition as _isValidPosition, createBaseLayers, escapeHtml } from './utils.js';
+
 export class APRSMap {
     constructor(elementId, options = {}) {
         // Options
@@ -14,37 +16,11 @@ export class APRSMap {
             attributionControl: true
         }).setView([37.7749, -122.4194], 8);
 
-        // Define base map layers
-        const streetMap = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-            maxZoom: 19
-        });
-
-        const topoMap = L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png', {
-            attribution: 'Map data: © OpenStreetMap contributors, SRTM | Map style: © OpenTopoMap (CC-BY-SA)',
-            maxZoom: 17
-        });
-
-        const terrainMap = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}', {
-            attribution: 'Tiles © Esri &mdash; Source: Esri, DeLorme, NAVTEQ, TomTom, Intermap, iPC, USGS, FAO, NPS, NRCAN, GeoBase, Kadaster NL, Ordnance Survey, Esri Japan, METI, Esri China (Hong Kong), and the GIS User Community',
-            maxZoom: 18
-        });
-
-        const satelliteMap = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-            attribution: 'Tiles © Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community',
-            maxZoom: 18
-        });
-
-        // Define base layers for layer control
-        const baseLayers = {
-            "Street": streetMap,
-            "Terrain": terrainMap,
-            "Topographic": topoMap,
-            "Satellite": satelliteMap
-        };
+        // Base tile layers from shared utils
+        const { layers: baseLayers } = createBaseLayers();
 
         // Add default layer (Terrain)
-        terrainMap.addTo(this.map);
+        baseLayers['Terrain'].addTo(this.map);
 
         // Add layer control to switch between map types
         L.control.layers(baseLayers, null, {
@@ -114,48 +90,14 @@ export class APRSMap {
         }
     }
 
-    /**
-     * Format relative time (e.g. "5m ago", "2h ago")
-     * @param {string|Date} timestamp - ISO timestamp string or Date object
-     * @returns {string} - Formatted relative time
-     */
+    /** Delegate to shared formatRelativeTime from utils.js */
     formatRelativeTime(timestamp) {
-        const date = new Date(timestamp);
-        const now = new Date();
-        const diff = now - date;
-
-        // If less than 1 hour, show minutes ago
-        if (diff < 3600000) {
-            const minutes = Math.floor(diff / 60000);
-            return minutes === 0 ? 'Just now' : `${minutes}m ago`;
-        }
-
-        // If less than 24 hours, show hours ago
-        if (diff < 86400000) {
-            const hours = Math.floor(diff / 3600000);
-            return `${hours}h ago`;
-        }
-
-        // Otherwise show date and time
-        return date.toLocaleString();
+        return _formatRelativeTime(timestamp);
     }
 
-    /**
-     * Validate that position is not at "Null Island" (0.0, 0.0)
-     * @param {number} lat - Latitude
-     * @param {number} lon - Longitude
-     * @returns {boolean} - True if valid, false if Null Island
-     */
+    /** Delegate to shared isValidPosition from utils.js */
     isValidPosition(lat, lon) {
-        // Reject exactly 0.0, 0.0 (Null Island - invalid GPS data)
-        if (lat === 0.0 && lon === 0.0) {
-            return false;
-        }
-        // Also reject null/undefined/NaN
-        if (lat == null || lon == null || isNaN(lat) || isNaN(lon)) {
-            return false;
-        }
-        return true;
+        return _isValidPosition(lat, lon);
     }
 
     /**
@@ -353,14 +295,14 @@ export class APRSMap {
     createPopupContent(station) {
         const pos = station.last_position;
         let content = `<div class="marker-popup">`;
-        content += `<strong><span class="callsign-link" onclick="window.location.href='/station/${encodeURIComponent(station.callsign)}'">${station.callsign}</span></strong><br>`;
+        content += `<strong><span class="callsign-link" onclick="window.location.href='/station/${encodeURIComponent(station.callsign)}'">${escapeHtml(station.callsign)}</span></strong><br>`;
 
         if (pos.grid_square) {
-            content += `Grid: ${pos.grid_square}<br>`;
+            content += `Grid: ${escapeHtml(pos.grid_square)}<br>`;
         }
 
         if (pos.comment) {
-            content += `${pos.comment}<br>`;
+            content += `${escapeHtml(pos.comment)}<br>`;
         }
 
         // Show last heard zero-hop timestamp for stations with heard_zero_hop=true
@@ -444,16 +386,16 @@ export class APRSMap {
         sortedStations.forEach(station => {
             const pos = station.last_position;
             content += `<div style="margin: 5px 0; padding: 5px 0; border-bottom: 1px solid #ddd;">`;
-            content += `<strong><span class="callsign-link" onclick="window.location.href='/station/${encodeURIComponent(station.callsign)}'">${station.callsign}</span></strong>`;
+            content += `<strong><span class="callsign-link" onclick="window.location.href='/station/${encodeURIComponent(station.callsign)}'">${escapeHtml(station.callsign)}</span></strong>`;
 
             // Add device info if available
             if (station.device) {
-                content += `<br><small style="color: #666;">${station.device}</small>`;
+                content += `<br><small style="color: #666;">${escapeHtml(station.device)}</small>`;
             }
 
             // Add grid square
             if (pos.grid_square) {
-                content += `<br><small>Grid: ${pos.grid_square}</small>`;
+                content += `<br><small>Grid: ${escapeHtml(pos.grid_square)}</small>`;
             }
 
             // Add comment if available
@@ -461,7 +403,7 @@ export class APRSMap {
                 const shortComment = pos.comment.length > 40
                     ? pos.comment.substring(0, 40) + '...'
                     : pos.comment;
-                content += `<br><small>${shortComment}</small>`;
+                content += `<br><small>${escapeHtml(shortComment)}</small>`;
             }
 
             content += `</div>`;
@@ -772,10 +714,10 @@ export class APRSMap {
         // Add popup with digipeater info (show filtered count)
         const popupContent = `
             <div class="digipeater-popup">
-                <strong><span class="callsign-link" onclick="window.location.href='/station/${encodeURIComponent(digi.callsign)}'">${digi.callsign}</span></strong> (Digipeater)<br>
+                <strong><span class="callsign-link" onclick="window.location.href='/station/${encodeURIComponent(digi.callsign)}'">${escapeHtml(digi.callsign)}</span></strong> (Digipeater)<br>
                 <small>Max range: ${(maxDistance / 1000).toFixed(1)} km</small><br>
                 <small>Stations heard: ${stationsToInclude.length}</small><br>
-                <small>Grid: ${digi.position.grid_square || 'N/A'}</small>
+                <small>Grid: ${escapeHtml(digi.position.grid_square || 'N/A')}</small>
             </div>
         `;
         polygon.bindPopup(popupContent);
@@ -1022,7 +964,7 @@ export class APRSMap {
 
             pathLine.bindPopup(`
                 <div class="path-popup">
-                    <strong>${callsign} Movement Path</strong><br>
+                    <strong>${escapeHtml(callsign)} Movement Path</strong><br>
                     <small>Positions: ${validPositions.length}</small><br>
                     <small>Time span: ${timeSpan} hours</small><br>
                     <small>Oldest: ${firstTime.toLocaleString()}</small><br>
@@ -1056,11 +998,11 @@ export class APRSMap {
 
                 historicalMarker.bindPopup(`
                     <div class="path-popup">
-                        <strong>${callsign}</strong><br>
+                        <strong>${escapeHtml(callsign)}</strong><br>
                         <small>${timeStr}</small><br>
                         <small>${age} minutes ago</small><br>
                         <small>${pos.latitude.toFixed(6)}, ${pos.longitude.toFixed(6)}</small>
-                        ${pos.grid_square ? `<br><small>Grid: ${pos.grid_square}</small>` : ''}
+                        ${pos.grid_square ? `<br><small>Grid: ${escapeHtml(pos.grid_square)}</small>` : ''}
                     </div>
                 `);
 
@@ -1232,7 +1174,7 @@ export class APRSMap {
 
         pathLine.bindPopup(`
             <div class="path-popup">
-                <strong>${callsign} Movement Path</strong><br>
+                <strong>${escapeHtml(callsign)} Movement Path</strong><br>
                 <small>Positions: ${validPositions.length}</small><br>
                 <small>Time span: ${timeSpan} hours</small>
             </div>

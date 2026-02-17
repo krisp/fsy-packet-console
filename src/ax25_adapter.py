@@ -141,6 +141,19 @@ class AX25Adapter:
                 level=3,
             )
 
+    async def reset_state(self):
+        """Reset connection state (sequence numbers, queues, link flags).
+
+        Used by RESET, HARDRESET, and POWERCYCLE commands to clear
+        adapter state without reinitializing the full adapter.
+        """
+        async with self._tx_lock:
+            self._tx_queue.clear()
+        self._ns = 0
+        self._nr = 0
+        self._link_established = False
+        self._pending_connect = None
+
     def register_frame_debug(self, cb):
         """Register a callback called with (direction:str, kiss_frame:bytes).
 

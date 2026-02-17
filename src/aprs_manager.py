@@ -32,7 +32,6 @@ from src.aprs.duplicate_detector import DuplicateDetector, DUPLICATE_WINDOW
 from src.aprs.manager import APRSManager
 
 # Module-level constants (for backwards compatibility)
-MESSAGE_RETRY_TIMEOUT = 30  # DEPRECATED: Use fast/slow timeouts instead
 MESSAGE_RETRY_FAST = 20  # seconds between fast retry attempts (not digipeated)
 MESSAGE_RETRY_SLOW = 600  # seconds between slow retry attempts (digipeated but not ACKed) - 10 minutes
 MESSAGE_MAX_RETRIES = 3  # maximum number of transmission attempts (original + 2 retries)
@@ -56,6 +55,6 @@ __all__ = [
     'APRSManager',
 
     # Module constants
-    'MESSAGE_RETRY_TIMEOUT', 'MESSAGE_RETRY_FAST', 'MESSAGE_RETRY_SLOW',
+    'MESSAGE_RETRY_FAST', 'MESSAGE_RETRY_SLOW',
     'MESSAGE_MAX_RETRIES'
 ]

@@ -4,6 +4,7 @@ FSY Packet Console - Command Processor and Main Application
 
 import asyncio
 import base64
+import functools
 import gzip
 import hashlib
 import html
@@ -42,7 +43,12 @@ from src.aprs.formatters import APRSFormatters
 from src.aprs.duplicate_detector import DuplicateDetector
 from src.ax25_adapter import AX25Adapter
 from src.device_id import get_device_identifier
-from src.constants import *
+from src.constants import (
+    DEBUG,
+    HEARTBEAT_INTERVAL,
+    RADIO_INDICATE_UUID,
+    TNC_RX_UUID,
+)
 from src.digipeater import Digipeater
 from src.frame_analyzer import (
     decode_ax25_address,
@@ -59,23 +65,28 @@ from src.commands.aprs_console_commands import APRSConsoleCommandHandler
 from src.commands.debug_commands import DebugCommandHandler
 from src.commands.radio_commands import RadioCommandHandler
 from src.protocol import (
-    build_iframe,
-    decode_kiss_aprs,
     kiss_unwrap,
     parse_ax25_addresses_and_control,
     wrap_kiss,
 )
 from src.radio import RadioController
 from src.tnc_bridge import TNCBridge
-from src.utils import *
+from src.utils import (
+    print_debug,
+    print_error,
+    print_header,
+    print_info,
+    print_pt,
+    print_tnc,
+    print_warning,
+)
 from src.web_server import WebServer
 
 # Use sanitize_for_xml from frame_analyzer
 sanitize_for_xml = fa_sanitize_for_xml
 
 
-# Use decode_ax25_address from frame_analyzer (adds 'raw' key but otherwise compatible)
-decode_ax25_address_field = decode_ax25_address
+
 
 
 def decode_control_field(control):
@@ -107,93 +118,6 @@ def decode_aprs_packet_type(info_str, dest_addr=None):
         result.update(details)
 
     return result
-
-
-
-
-def format_detailed_frame(frame, index=1):
-    """
-    Wrapper for format_frame_detailed from frame_analyzer.
-    Converts FrameHistoryEntry to the structure expected by format_frame_detailed,
-    then adds device identification logic specific to console.py.
-
-    Args:
-        frame: FrameHistoryEntry object
-        index: Frame number in sequence
-
-    Returns:
-        List of HTML-formatted strings for display
-    """
-    # Decode the KISS frame using frame_analyzer
-    decoded = decode_kiss_frame(frame.raw_bytes)
-
-    # Format timestamp
-    time_str = frame.timestamp.strftime("%H:%M:%S.%f")[:-3]
-
-    # Use format_frame_detailed from frame_analyzer with HTML output
-    lines = format_frame_detailed(
-        decoded=decoded,
-        frame_num=index,
-        timestamp=time_str,
-        direction=frame.direction,
-        output_format='html'
-    )
-
-    # Add console-specific device identification if APRS data is present
-    # Insert device info before hex dump section
-    if decoded.get('aprs') and not 'error' in decoded:
-        aprs = decoded['aprs']
-        dest = decoded.get('ax25', {}).get('destination', {})
-        dest_call = dest.get('callsign') if dest else None
-
-        device_info = None
-        try:
-            device_id = get_device_identifier()
-
-            # Try to identify by tocall (destination address) for normal APRS
-            if dest_call:
-                device_info = device_id.identify_by_tocall(dest_call)
-
-            # For MIC-E, try to identify by comment suffix
-            details = aprs.get('details', {})
-            if not device_info and aprs.get('type') == 'APRS MIC-E Position' and 'comment' in details:
-                device_info = device_id.identify_by_mice(details.get('comment', ''))
-
-            if device_info:
-                # Find where to insert (before hex dump)
-                insert_index = len(lines)
-                for i, line in enumerate(lines):
-                    line_text = str(line) if hasattr(line, '__str__') else ''
-                    if 'Hex Dump' in line_text:
-                        insert_index = i
-                        break
-
-                # Create device info lines
-                device_lines = [
-                    HTML(f"\n<cyan><b>Device Identification</b></cyan>"),
-                    HTML(f"  Vendor: <green>{sanitize_for_xml(device_info.vendor)}</green>"),
-                    HTML(f"  Model: <green>{sanitize_for_xml(device_info.model)}</green>")
-                ]
-
-                if device_info.version:
-                    device_lines.append(HTML(f"  Version: <green>{sanitize_for_xml(device_info.version)}</green>"))
-                if device_info.class_type:
-                    device_lines.append(HTML(f"  Class: <yellow>{sanitize_for_xml(device_info.class_type)}</yellow>"))
-
-                # Show detection method
-                if aprs.get('type') == 'APRS MIC-E Position':
-                    device_lines.append(HTML(f"  <gray>(detected from MIC-E comment suffix)</gray>"))
-                else:
-                    device_lines.append(HTML(f"  <gray>(detected from destination: {sanitize_for_xml(dest_call)})</gray>"))
-
-                # Insert at found position
-                lines = lines[:insert_index] + device_lines + lines[insert_index:]
-
-        except Exception:
-            # Silently fail device detection - not critical
-            pass
-
-    return lines
 
 
 def calculate_hop_count(addresses: List[str]) -> int:
@@ -453,7 +377,6 @@ class FrameHistory:
         except Exception as e:
             # Log error but don't disrupt operation
             print_error(f"Failed to save frame buffer: {type(e).__name__}: {e}")
-            import traceback
             print_debug(traceback.format_exc(), level=3)
 
     async def load_from_disk_async(self) -> dict:
@@ -557,7 +480,6 @@ class FrameHistory:
             # If load fails (corrupted file, format change, etc.), start fresh
             print_error(f"Failed to load frame buffer: {type(e).__name__}: {e}")
             print_warning("Starting with empty frame buffer")
-            import traceback
             print_debug(traceback.format_exc(), level=3)
             self.frames.clear()
             self.frame_counter = 0
@@ -1454,33 +1376,36 @@ class CommandProcessor:
         self.serial_mode = serial_mode  # True if using serial TNC (no radio control)
         self.console_mode = "aprs" if serial_mode else "radio"  # Start in APRS mode for serial
 
+        def _radio(cmd_name):
+            return functools.partial(self._dispatch_radio_command, _cmd_name=cmd_name)
+
         self.commands = {
             "help": self.cmd_help,
-            "status": self._dispatch_radio_command,  # Uses radio handler
-            "health": self._dispatch_radio_command,  # Uses radio handler
-            "notifications": self._dispatch_radio_command,  # Uses radio handler
-            "vfo": self._dispatch_radio_command,  # Uses radio handler
-            "setvfo": self._dispatch_radio_command,  # Uses radio handler
-            "active": self._dispatch_radio_command,  # Uses radio handler
-            "dual": self._dispatch_radio_command,  # Uses radio handler
-            "scan": self._dispatch_radio_command,  # Uses radio handler
-            "squelch": self._dispatch_radio_command,  # Uses radio handler
-            "volume": self._dispatch_radio_command,  # Uses radio handler
-            "bss": self._dispatch_radio_command,  # Uses radio handler
-            "setbss": self._dispatch_radio_command,  # Uses radio handler
-            "poweron": self._dispatch_radio_command,  # Uses radio handler
-            "poweroff": self._dispatch_radio_command,  # Uses radio handler
-            "channel": self._dispatch_radio_command,  # Uses radio handler
-            "list": self._dispatch_radio_command,  # Uses radio handler
-            "power": self._dispatch_radio_command,  # Uses radio handler
-            "freq": self._dispatch_radio_command,  # Uses radio handler
-            "dump": self._dispatch_radio_command,  # Uses radio handler
-            "debug": self._dispatch_debug_command,  # Uses debug handler
-            "tncsend": self._dispatch_tnc_command,  # Uses TNC handler
-            "aprs": self._dispatch_aprs_command,  # Uses APRS handler
-            "pws": self._dispatch_pws_command,  # Uses weather handler
-            "scan_ble": self._dispatch_radio_command,  # Uses radio handler
-            "gps": self._dispatch_radio_command,  # Uses radio handler
+            "status": _radio("status"),
+            "health": _radio("health"),
+            "notifications": _radio("notifications"),
+            "vfo": _radio("vfo"),
+            "setvfo": _radio("setvfo"),
+            "active": _radio("active"),
+            "dual": _radio("dual"),
+            "scan": _radio("scan"),
+            "squelch": _radio("squelch"),
+            "volume": _radio("volume"),
+            "bss": _radio("bss"),
+            "setbss": _radio("setbss"),
+            "poweron": _radio("poweron"),
+            "poweroff": _radio("poweroff"),
+            "channel": _radio("channel"),
+            "list": _radio("list"),
+            "power": _radio("power"),
+            "freq": _radio("freq"),
+            "dump": _radio("dump"),
+            "debug": self._dispatch_debug_command,
+            "tncsend": self._dispatch_tnc_command,
+            "aprs": self._dispatch_aprs_command,
+            "pws": self._dispatch_pws_command,
+            "scan_ble": _radio("scan_ble"),
+            "gps": _radio("gps"),
             "tnc": self.cmd_tnc,
             "quit": self.cmd_quit,
             "exit": self.cmd_quit,
@@ -1677,23 +1602,10 @@ class CommandProcessor:
         """Dispatch PWS (Personal Weather Station) command to handler."""
         await self.weather_handler.pws(args)
 
-    async def _dispatch_radio_command(self, args):
+    async def _dispatch_radio_command(self, args, _cmd_name=None):
         """Dispatch radio control command to handler."""
-        # Get the command name from the call stack
-        import inspect
-        frame = inspect.currentframe()
-        # Walk up the stack to find the command dispatcher
-        caller_frame = frame.f_back
-        # Get the command being executed from process() method
-        # The command name will be in the local variables of process()
-        while caller_frame:
-            if 'cmd' in caller_frame.f_locals:
-                cmd = caller_frame.f_locals['cmd']
-                break
-            caller_frame = caller_frame.f_back
-
-        # Dispatch to radio handler
-        await self.radio_handler.dispatch(cmd.upper(), args)
+        if _cmd_name:
+            await self.radio_handler.dispatch(_cmd_name.upper(), args)
 
     async def _dispatch_tnc_command(self, args):
         """Dispatch TNCSEND command to TNC handler."""
@@ -1762,7 +1674,6 @@ class CommandProcessor:
                 await self.commands[cmd](args)
             except Exception as e:
                 print_error(f"Command failed: {e}")
-                import traceback
                 traceback.print_exc()
         else:
             if self.console_mode == "aprs":
@@ -2432,10 +2343,10 @@ class CommandProcessor:
                     level=4,
                 )
                 try:
-                    ascii = "".join(
+                    ascii_repr = "".join(
                         chr(b) if 32 <= b <= 126 else "." for b in kiss_frame
                     )
-                    print_debug(f"TNC TX ASCII: {ascii}", level=4)
+                    print_debug(f"TNC TX ASCII: {ascii_repr}", level=4)
                 except Exception:
                     pass
             elif direction == "rx":
@@ -2444,10 +2355,10 @@ class CommandProcessor:
                     level=4,
                 )
                 try:
-                    ascii = "".join(
+                    ascii_repr = "".join(
                         chr(b) if 32 <= b <= 126 else "." for b in kiss_frame
                     )
-                    print_debug(f"TNC RX ASCII: {ascii}", level=4)
+                    print_debug(f"TNC RX ASCII: {ascii_repr}", level=4)
                 except Exception:
                     pass
         except Exception:
@@ -3102,56 +3013,6 @@ class CommandProcessor:
 
 # === Monitor Tasks ===
 
-# Duplicate packet detection cache
-# Tracks (packet_hash, timestamp) to suppress digipeater duplicates
-# Format: {packet_hash: timestamp}
-_duplicate_cache = {}
-_DUPLICATE_WINDOW = 30  # seconds to consider packets as duplicates
-
-
-def is_duplicate_packet(src_call: str, info: str) -> bool:
-    """Check if packet is a duplicate based on source and content.
-
-    Packets from the same source with identical content within the
-    duplicate window (30 seconds) are considered duplicates.
-
-    This suppresses multiple digipeater copies of the same packet
-    while still allowing new packets from the same station.
-
-    Args:
-        src_call: Source callsign
-        info: Packet information field content
-
-    Returns:
-        True if packet is a duplicate, False otherwise
-    """
-    global _duplicate_cache
-
-    # Create hash of source + content
-    packet_key = f"{src_call}:{info}"
-    packet_hash = hashlib.md5(packet_key.encode()).hexdigest()
-
-    current_time = time.time()
-
-    # Clean old entries from cache (older than duplicate window)
-    expired = [
-        h
-        for h, ts in _duplicate_cache.items()
-        if current_time - ts > _DUPLICATE_WINDOW
-    ]
-    for h in expired:
-        del _duplicate_cache[h]
-
-    # Check if this packet hash exists in cache
-    if packet_hash in _duplicate_cache:
-        # Duplicate found - update timestamp and return True
-        _duplicate_cache[packet_hash] = current_time
-        return True
-
-    # Not a duplicate - add to cache
-    _duplicate_cache[packet_hash] = current_time
-    return False
-
 
 def parse_and_track_aprs_frame(complete_frame, radio, timestamp=None, frame_number=None):
     """Parse APRS frame and update database tracking.
@@ -3589,7 +3450,6 @@ async def tnc_monitor(tnc_queue, radio):
                         except Exception as e:
                             if constants.DEBUG_LEVEL >= 2:
                                 print_debug(f"Digipeater error: {e}", level=2)
-                                import traceback
                                 print_debug(traceback.format_exc(), level=3)
 
                     # Display ASCII-decoded frame at debug level 1 (all modes)
@@ -3786,8 +3646,6 @@ async def tnc_monitor(tnc_queue, radio):
 
         except Exception as e:
             print_error(f"TNC monitor error: {e}")
-            import traceback
-
             traceback.print_exc()
             # Clear buffer to prevent corruption from cascading
             frame_buffer.clear()
@@ -4149,7 +4007,7 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
 
     # Serial mode
     if serial_port:
-        print_pt(HTML(f"<gray>Serial KISS Mode: {serial_port} @ {serial_baud} baud...</gray>\n"))
+        print_info(f"Serial KISS Mode: {serial_port} @ {serial_baud} baud..")
 
         try:
             from src.transport import SerialTransport
@@ -4173,7 +4031,7 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
 
     # TCP KISS TNC Client Mode
     elif tcp_host:
-        print_pt(HTML(f"<gray>TCP KISS Mode: {tcp_host}:{tcp_port}...</gray>\n"))
+        print_info(f"TCP KISS Mode: {tcp_host}:{tcp_port}...")
 
         try:
             from src.transport import TCPTransport
@@ -4196,7 +4054,7 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
 
     # BLE mode
     else:
-        print_pt(HTML(f"<gray>Connecting to {ble_mac}...</gray>\n"))
+        print_info(f"Connecting to {ble_mac}...")
 
         device = await BleakScanner.find_device_by_address(
             ble_mac, timeout=10.0

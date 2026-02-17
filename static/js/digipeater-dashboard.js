@@ -3,6 +3,7 @@
  */
 
 import { APRSApi } from './api.js';
+import { escapeHtml, SSEManager } from './utils.js';
 import {
     createHourlyActivityChart,
     createTopStationsChart,
@@ -383,7 +384,7 @@ export class DigipeaterDashboard {
             html += `
                 <tr>
                     <td>${rank}</td>
-                    <td class="callsign-cell">${station.callsign}</td>
+                    <td class="callsign-cell">${escapeHtml(station.callsign)}</td>
                     <td>${station.count}</td>
                     <td>${percentage}%</td>
                     <td>${lastHeard}</td>
@@ -419,7 +420,7 @@ export class DigipeaterDashboard {
             html += `
                 <tr>
                     <td>${rank}</td>
-                    <td class="callsign-cell">${digi.callsign}</td>
+                    <td class="callsign-cell">${escapeHtml(digi.callsign)}</td>
                     <td>${digi.packets_relayed}</td>
                     <td>${digi.unique_stations}</td>
                     <td>${lastHeard}</td>
@@ -522,10 +523,22 @@ export class DigipeaterDashboard {
     setupSSEListener() {
         console.log('Setting up SSE listener...');
 
-        this.eventSource = this.api.connectSSE(
-            (eventType, data) => this.handleSSEEvent(eventType, data),
-            (status) => this.handleConnectionChange(status)
-        );
+        const parseEvent = (type) => (e) => {
+            try {
+                this.handleSSEEvent(type, JSON.parse(e.data));
+            } catch (err) {
+                console.error(`Error parsing ${type} event:`, err);
+            }
+        };
+
+        this.sseManager = new SSEManager('/api/events', {
+            listeners: {
+                station_update: parseEvent('station_update'),
+                digipeater_update: parseEvent('digipeater_update'),
+            },
+            onConnected: () => this.handleConnectionChange('connected'),
+            onDisconnected: () => this.handleConnectionChange('disconnected'),
+        });
     }
 
     /**
@@ -910,9 +923,9 @@ export class DigipeaterDashboard {
         console.log('Destroying digipeater dashboard...');
 
         // Close SSE connection
-        if (this.eventSource) {
-            this.eventSource.close();
-            this.eventSource = null;
+        if (this.sseManager) {
+            this.sseManager.close();
+            this.sseManager = null;
         }
 
         // Clear timers

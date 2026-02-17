@@ -4,7 +4,8 @@
 
 import { APRSApi } from './api.js';
 import { APRSMap } from './map.js';
-import { createTemperatureChart, formatTime } from './charts.js';
+import { createTemperatureChart } from './charts.js';
+import { formatRelativeTime, escapeHtml } from './utils.js';
 
 const api = new APRSApi();
 
@@ -22,7 +23,7 @@ export function renderStationList(stations) {
     }
 
     container.innerHTML = stations.map(station => {
-        const lastHeard = formatTime(station.last_heard);
+        const lastHeard = formatRelativeTime(station.last_heard);
         const position = station.has_position ? station.last_position.grid_square : 'No position';
         const hopInfo = station.hop_count !== null && station.hop_count !== 999
             ? `${station.hop_count} hops`
@@ -30,8 +31,8 @@ export function renderStationList(stations) {
 
         return `
             <div class="station-item" onclick="window.location.href='/station/${encodeURIComponent(station.callsign)}'">
-                <div class="station-callsign">${station.callsign}</div>
-                <div class="station-info">${position}</div>
+                <div class="station-callsign">${escapeHtml(station.callsign)}</div>
+                <div class="station-info">${escapeHtml(position)}</div>
                 <div class="station-meta">
                     ${lastHeard} • ${station.packets_heard} packets • ${hopInfo}
                 </div>
@@ -55,7 +56,7 @@ export function renderWeatherList(weatherStations) {
 
     container.innerHTML = weatherStations.map(station => {
         const wx = station.last_weather;
-        const lastHeard = formatTime(station.last_heard);
+        const lastHeard = formatRelativeTime(station.last_heard);
 
         let tempStr = wx.temperature !== null ? `${wx.temperature}°F` : '-';
         let humidityStr = wx.humidity !== null ? `${wx.humidity}%` : '-';
@@ -64,7 +65,7 @@ export function renderWeatherList(weatherStations) {
 
         return `
             <div class="weather-item" onclick="window.location.href='/station/${encodeURIComponent(station.callsign)}'">
-                <div class="weather-callsign">${station.callsign}</div>
+                <div class="weather-callsign">${escapeHtml(station.callsign)}</div>
                 <div class="weather-data">
                     <div>Temp: <span class="weather-value">${tempStr}</span></div>
                     <div>Humidity: <span class="weather-value">${humidityStr}</span></div>
@@ -95,15 +96,15 @@ export function renderMessageList(messages) {
 
     container.innerHTML = recentMessages.map(msg => {
         const unreadClass = msg.read ? '' : 'unread';
-        const time = formatTime(msg.timestamp);
+        const time = formatRelativeTime(msg.timestamp);
 
         return `
             <div class="message-item ${unreadClass}">
                 <div class="message-header">
-                    <span class="message-from callsign-link" onclick="window.location.href='/station/${encodeURIComponent(msg.from_call)}'">${msg.from_call}</span>
+                    <span class="message-from callsign-link" onclick="window.location.href='/station/${encodeURIComponent(msg.from_call)}'">${escapeHtml(msg.from_call)}</span>
                     <span class="message-time">${time}</span>
                 </div>
-                <div class="message-text">${msg.message}</div>
+                <div class="message-text">${escapeHtml(msg.message)}</div>
             </div>
         `;
     }).join('');
@@ -128,12 +129,12 @@ export function renderStationMessages(callsign, messages) {
 
         // Make callsigns clickable if they're not the current station
         const fromCallHtml = msg.from_call === callsign
-            ? `<span class="station-highlight">${msg.from_call}</span>`
-            : `<span class="callsign-link" onclick="window.location.href='/station/${encodeURIComponent(msg.from_call)}'">${msg.from_call}</span>`;
+            ? `<span class="station-highlight">${escapeHtml(msg.from_call)}</span>`
+            : `<span class="callsign-link" onclick="window.location.href='/station/${encodeURIComponent(msg.from_call)}'">${escapeHtml(msg.from_call)}</span>`;
 
         const toCallHtml = msg.to_call === callsign
-            ? `<span class="station-highlight">${msg.to_call}</span>`
-            : `<span class="callsign-link" onclick="window.location.href='/station/${encodeURIComponent(msg.to_call)}'">${msg.to_call}</span>`;
+            ? `<span class="station-highlight">${escapeHtml(msg.to_call)}</span>`
+            : `<span class="callsign-link" onclick="window.location.href='/station/${encodeURIComponent(msg.to_call)}'">${escapeHtml(msg.to_call)}</span>`;
 
         return `
             <div class="station-message-item ${directionClass}">
@@ -143,9 +144,9 @@ export function renderStationMessages(callsign, messages) {
                         <span>→</span>
                         ${toCallHtml}
                     </div>
-                    <div class="station-message-time">${formatTime(msg.timestamp)}</div>
+                    <div class="station-message-time">${formatRelativeTime(msg.timestamp)}</div>
                 </div>
-                <div class="station-message-text">${msg.message}</div>
+                <div class="station-message-text">${escapeHtml(msg.message)}</div>
             </div>
         `;
     }).join('');
@@ -166,7 +167,7 @@ export async function loadStationDetail(callsign) {
         document.getElementById('callsign').textContent = callsign;
 
         // Update last heard
-        document.getElementById('last-heard').textContent = `Last heard: ${formatTime(station.last_heard)}`;
+        document.getElementById('last-heard').textContent = `Last heard: ${formatRelativeTime(station.last_heard)}`;
 
         // Update position information
         if (station.has_position && station.last_position) {
@@ -229,7 +230,7 @@ export async function loadStationDetail(callsign) {
 
                         pathLine.bindPopup(`
                             <div class="path-popup">
-                                <strong>${station.callsign} Movement Path</strong><br>
+                                <strong>${escapeHtml(station.callsign)} Movement Path</strong><br>
                                 <small>Positions: ${validPositions.length}</small><br>
                                 <small>Time span: ${timeSpan} hours</small><br>
                                 <small>Oldest: ${firstTime.toLocaleString()}</small><br>
@@ -261,11 +262,11 @@ export async function loadStationDetail(callsign) {
 
                             historicalMarker.bindPopup(`
                                 <div class="path-popup">
-                                    <strong>${station.callsign}</strong><br>
+                                    <strong>${escapeHtml(station.callsign)}</strong><br>
                                     <small>${timeStr}</small><br>
                                     <small>${age} minutes ago</small><br>
                                     <small>${pos.latitude.toFixed(6)}, ${pos.longitude.toFixed(6)}</small>
-                                    ${pos.grid_square ? `<br><small>Grid: ${pos.grid_square}</small>` : ''}
+                                    ${pos.grid_square ? `<br><small>Grid: ${escapeHtml(pos.grid_square)}</small>` : ''}
                                 </div>
                             `);
 
@@ -334,7 +335,7 @@ export async function loadStationDetail(callsign) {
                             // Add popup with coverage info (but don't open it)
                             const popupContent = `
                                 <div class="digipeater-popup">
-                                    <strong><span class="callsign-link" onclick="window.location.href='/station/${encodeURIComponent(callsign)}'">${callsign}</span> Coverage Area</strong><br>
+                                    <strong><span class="callsign-link" onclick="window.location.href='/station/${encodeURIComponent(callsign)}'">${escapeHtml(callsign)}</span> Coverage Area</strong><br>
                                     <small>Max range: ${(maxDistance / 1000).toFixed(1)} km (${(maxDistance / 1609.34).toFixed(1)} mi)</small><br>
                                     <small>Stations heard: ${digiData.station_count}</small>
                                 </div>
@@ -372,8 +373,8 @@ export async function loadStationDetail(callsign) {
                                 // Add popup with station info
                                 const stationPopup = `
                                     <div class="station-popup">
-                                        <strong><span class="callsign-link" onclick="window.location.href='/station/${encodeURIComponent(heardStation.callsign)}'">${heardStation.callsign}</span></strong><br>
-                                        <small>Grid: ${heardStation.position.grid_square || 'N/A'}</small><br>
+                                        <strong><span class="callsign-link" onclick="window.location.href='/station/${encodeURIComponent(heardStation.callsign)}'">${escapeHtml(heardStation.callsign)}</span></strong><br>
+                                        <small>Grid: ${escapeHtml(heardStation.position.grid_square || 'N/A')}</small><br>
                                         <small>Distance: ${(L.latLng(digiLatLng).distanceTo([heardStation.position.latitude, heardStation.position.longitude]) / 1000).toFixed(1)} km</small>
                                     </div>
                                 `;
@@ -491,8 +492,8 @@ export async function loadStationDetail(callsign) {
 
                                         const stationPopup = `
                                             <div class="station-popup">
-                                                <strong><span class="callsign-link" onclick="window.location.href='/station/${encodeURIComponent(zeroStation.callsign)}'">${zeroStation.callsign}</span></strong><br>
-                                                <small>Grid: ${zeroStation.last_position.grid_square || 'N/A'}</small><br>
+                                                <strong><span class="callsign-link" onclick="window.location.href='/station/${encodeURIComponent(zeroStation.callsign)}'">${escapeHtml(zeroStation.callsign)}</span></strong><br>
+                                                <small>Grid: ${escapeHtml(zeroStation.last_position.grid_square || 'N/A')}</small><br>
                                                 <small>Distance: ${(L.latLng(localLatLng).distanceTo([zeroStation.last_position.latitude, zeroStation.last_position.longitude]) / 1000).toFixed(1)} km</small>
                                             </div>
                                         `;
@@ -516,8 +517,8 @@ export async function loadStationDetail(callsign) {
         }
 
         // Update statistics
-        document.getElementById('first-heard').textContent = formatTime(station.first_heard);
-        document.getElementById('last-heard-stat').textContent = formatTime(station.last_heard);
+        document.getElementById('first-heard').textContent = formatRelativeTime(station.first_heard);
+        document.getElementById('last-heard-stat').textContent = formatRelativeTime(station.last_heard);
 
         // Update device info if available
         if (station.device) {
@@ -561,7 +562,7 @@ export async function loadStationDetail(callsign) {
                 if (realStations.length > 0) {
                     // Make each callsign clickable
                     const clickableStations = realStations.map(call =>
-                        `<span class="callsign-link" onclick="window.location.href='/station/${encodeURIComponent(call)}'">${call}</span>`
+                        `<span class="callsign-link" onclick="window.location.href='/station/${encodeURIComponent(call)}'">${escapeHtml(call)}</span>`
                     );
                     return clickableStations.join(' → ');
                 } else {

@@ -171,7 +171,7 @@ def calculate_dew_point(temp_f: float, humidity: int) -> Optional[float]:
     Returns:
         Dew point in Fahrenheit, or None if invalid inputs
     """
-    if temp_f is None or humidity is None or humidity < 0 or humidity > 100:
+    if temp_f is None or humidity is None or humidity <= 0 or humidity > 100:
         return None
 
     # Convert F to C for calculation

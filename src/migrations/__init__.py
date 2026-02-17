@@ -188,6 +188,10 @@ class MigrationManager:
                     'result': migration_result
                 }
 
+                # Save state immediately after each migration so it persists
+                # even if the program is interrupted before all migrations finish
+                self.save_migration_state()
+
                 results['applied'] += 1
                 results['details'][migration_id] = {
                     'status': 'applied',
@@ -205,9 +209,8 @@ class MigrationManager:
                     'error': str(e)
                 }
 
-        # Save state after all migrations
-        if results['applied'] > 0:
-            self.save_migration_state()
+        # Note: state is saved after each individual migration above,
+        # so no final save needed here
 
         return results
 

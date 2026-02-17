@@ -6,6 +6,7 @@ and database operations for the main console interface.
 """
 
 import os
+from datetime import datetime, timezone
 
 from .base import CommandHandler, command
 from src.utils import print_pt, print_info, print_error, print_header, print_warning
@@ -478,7 +479,6 @@ class APRSConsoleCommandHandler(CommandHandler):
         print_pt(HTML("<b>Time                 Type      Hops  Direct  Relay      Path</b>"))
         print_pt(HTML("<gray>────────────────────────────────────────────────────────────────────────────────</gray>"))
 
-        from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
 
         for i, rx in enumerate(receptions, 1):

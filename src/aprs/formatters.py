@@ -45,7 +45,7 @@ class APRSFormatters:
         else:
             # Received message - show read status and sender
             status = "NEW" if not msg.read else "READ"
-            msg_id_str = f" {{{{msg_id}}}}" if msg.message_id else ""
+            msg_id_str = f" {{{msg.message_id}}}" if msg.message_id else ""
             return f"{prefix}[{status}] {time_str} From: {msg.from_call}\n  {msg.message}{msg_id_str}"
 
     @staticmethod

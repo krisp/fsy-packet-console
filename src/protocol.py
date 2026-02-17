@@ -8,6 +8,71 @@ import struct
 from src.constants import *
 from src.utils import print_debug, print_error
 
+# KISS TNC framing constants
+FEND = 0xC0   # Frame End delimiter
+FESC = 0xDB   # Frame Escape
+TFEND = 0xDC  # Transposed Frame End (after FESC)
+TFESC = 0xDD  # Transposed Frame Escape (after FESC)
+
+
+def encode_ax25_address(call, is_last=False):
+    """Encode a callsign into a 7-byte AX.25 address field.
+
+    Handles SSID parsing, has-been-used (H) bit for digipeater paths,
+    and the last-address extension bit.
+
+    Args:
+        call: Callsign string, optionally with -SSID and/or trailing '*'
+        is_last: If True, set the extension bit marking last address
+
+    Returns:
+        7-byte encoded AX.25 address field
+    """
+    has_been_used = call.endswith('*')
+    call = call.rstrip('*')
+
+    if "-" in call:
+        callsign, ssid = call.split("-", 1)
+        ssid = int(ssid)
+    else:
+        callsign = call
+        ssid = 0
+
+    callsign = callsign.upper().ljust(6)[:6]
+    encoded = bytearray([ord(c) << 1 for c in callsign])
+    ssid_byte = 0x60 | ((ssid & 0x0F) << 1)
+
+    if has_been_used:
+        ssid_byte |= 0x80
+
+    if is_last:
+        ssid_byte |= 0x01
+    encoded.append(ssid_byte)
+    return bytes(encoded)
+
+
+def build_ax25_address_field(dest, source, path):
+    """Build the complete AX.25 address field (dest + source + digipeaters).
+
+    Sets the extension bit on the last address in the field.
+
+    Args:
+        dest: Destination callsign
+        source: Source callsign
+        path: List of digipeater callsigns
+
+    Returns:
+        Encoded address field as bytearray
+    """
+    field = bytearray()
+    field.extend(encode_ax25_address(dest, is_last=False))
+    is_last = len(path) == 0
+    field.extend(encode_ax25_address(source, is_last=is_last))
+    for i, digi in enumerate(path):
+        is_last = i == len(path) - 1
+        field.extend(encode_ax25_address(digi, is_last=is_last))
+    return field
+
 
 def build_message(command_group, is_reply, command_id, body=b""):
     """Build a benlink message."""
@@ -32,61 +97,16 @@ def parse_message(data):
 
 
 def encode_aprs_packet(from_call, to_call, path, message):
-    """Encode an APRS message as a KISS frame."""
+    """Encode an APRS message as a KISS frame.
 
-    def encode_callsign(call, is_last=False):
-        """Encode callsign in AX.25 format."""
-        # Check for asterisk (used/has-been-repeated bit) before stripping
-        has_been_used = call.endswith('*')
-        call = call.rstrip('*')
-
-        if "-" in call:
-            callsign, ssid = call.split("-")
-            ssid = int(ssid)
-        else:
-            callsign = call
-            ssid = 0
-
-        callsign = callsign.ljust(6)
-        encoded = bytearray([ord(c) << 1 for c in callsign])
-        ssid_byte = 0x60 | ((ssid & 0x0F) << 1)
-
-        # Set H-bit (bit 7) if this digipeater has been used
-        if has_been_used:
-            ssid_byte |= 0x80
-
-        if is_last:
-            ssid_byte |= 0x01
-        encoded.append(ssid_byte)
-        return bytes(encoded)
-
-    packet = bytearray()
-    packet.extend(encode_callsign(to_call, is_last=False))
-    is_last = len(path) == 0
-    packet.extend(encode_callsign(from_call, is_last=is_last))
-
-    for i, digi in enumerate(path):
-        is_last = i == len(path) - 1
-        packet.extend(encode_callsign(digi, is_last=is_last))
-
-    packet.append(0x03)
-    packet.append(0xF0)
+    Builds an AX.25 UI frame with the given addressing and wraps it
+    in a KISS data frame (port 0).
+    """
+    packet = build_ax25_address_field(to_call, from_call, path)
+    packet.append(0x03)   # UI control byte
+    packet.append(0xF0)   # No Layer 3 PID
     packet.extend(message.encode("ascii"))
-
-    kiss_frame = bytearray()
-    kiss_frame.append(0xC0)
-    kiss_frame.append(0x00)
-
-    for byte in packet:
-        if byte == 0xC0:
-            kiss_frame.extend([0xDB, 0xDC])
-        elif byte == 0xDB:
-            kiss_frame.extend([0xDB, 0xDD])
-        else:
-            kiss_frame.append(byte)
-
-    kiss_frame.append(0xC0)
-    return bytes(kiss_frame)
+    return wrap_kiss(bytes(packet))
 
 
 def decode_ax25_address(data, offset):
@@ -178,8 +198,6 @@ def decode_kiss_aprs(data):
     """Decode KISS/APRS packet for display."""
     if len(data) < 2:
         return "Invalid KISS frame"
-
-    original_data = data
 
     # Skip KISS framing
     if data[0] == 0xC0:
@@ -655,20 +673,48 @@ def decode_ht_status(payload):
 
 
 def kiss_escape(payload: bytes) -> bytes:
-    """Escape FEND/FESC bytes for KISS frames.
+    """Escape FEND/FESC bytes for KISS transmission.
 
     Replaces:
-      0xC0 -> 0xDB 0xDC
-      0xDB -> 0xDB 0xDD
+      FEND (0xC0) -> FESC TFEND (0xDB 0xDC)
+      FESC (0xDB) -> FESC TFESC (0xDB 0xDD)
     """
     out = bytearray()
     for b in payload:
-        if b == 0xC0:
-            out.extend(b"\xdb\xdc")
-        elif b == 0xDB:
-            out.extend(b"\xdb\xdd")
+        if b == FEND:
+            out.append(FESC)
+            out.append(TFEND)
+        elif b == FESC:
+            out.append(FESC)
+            out.append(TFESC)
         else:
             out.append(b)
+    return bytes(out)
+
+
+def kiss_unescape(data: bytes) -> bytes:
+    """Reverse KISS escape sequences in raw data.
+
+    Replaces:
+      FESC TFEND (0xDB 0xDC) -> FEND (0xC0)
+      FESC TFESC (0xDB 0xDD) -> FESC (0xDB)
+    """
+    out = bytearray()
+    i = 0
+    while i < len(data):
+        if data[i] == FESC and i + 1 < len(data):
+            if data[i + 1] == TFEND:
+                out.append(FEND)
+                i += 2
+            elif data[i + 1] == TFESC:
+                out.append(FESC)
+                i += 2
+            else:
+                out.append(data[i])
+                i += 1
+        else:
+            out.append(data[i])
+            i += 1
     return bytes(out)
 
 
@@ -679,7 +725,7 @@ def wrap_kiss(frame: bytes, port: int = 0) -> bytes:
     CMD = (port << 4) | 0x00  (0x00 = data frame)
     """
     cmd = (port & 0x0F) << 4
-    return bytes([0xC0, cmd]) + kiss_escape(frame) + bytes([0xC0])
+    return bytes([FEND, cmd]) + kiss_escape(frame) + bytes([FEND])
 
 
 # HDLC / Link-layer helpers (basic, minimal implementation)
@@ -694,38 +740,18 @@ def kiss_unwrap(kiss_frame: bytes) -> bytes:
         return b""
 
     data = bytes(kiss_frame)
-    # Strip leading/trailing FEND (0xC0)
-    if data[0] == 0xC0:
+    # Strip leading FEND
+    if data[0] == FEND:
         data = data[1:]
     if len(data) == 0:
         return b""
-    # If first byte is CMD, strip it
-    cmd = data[0]
-    # remove cmd byte
+    # Strip CMD byte
     data = data[1:]
-    # strip trailing FEND if present
-    if len(data) > 0 and data[-1] == 0xC0:
+    # Strip trailing FEND if present
+    if len(data) > 0 and data[-1] == FEND:
         data = data[:-1]
 
-    # Un-escape
-    out = bytearray()
-    i = 0
-    while i < len(data):
-        if data[i] == 0xDB and i + 1 < len(data):
-            if data[i + 1] == 0xDC:
-                out.append(0xC0)
-                i += 2
-            elif data[i + 1] == 0xDD:
-                out.append(0xDB)
-                i += 2
-            else:
-                out.append(data[i])
-                i += 1
-        else:
-            out.append(data[i])
-            i += 1
-
-    return bytes(out)
+    return kiss_unescape(data)
 
 
 def parse_ax25_addresses_and_control(payload: bytes):
@@ -763,41 +789,7 @@ def parse_ax25_addresses_and_control(payload: bytes):
 
 def build_hdlc_uframe(source, dest, path, control_byte):
     """Build a minimal HDLC U-frame (addresses + control byte)."""
-
-    def encode_address(call, is_last=False):
-        # Check for asterisk (used/has-been-repeated bit) before stripping
-        has_been_used = call.endswith('*')
-        call = call.rstrip('*')
-
-        if "-" in call:
-            callsign, ssid = call.split("-", 1)
-            ssid = int(ssid)
-        else:
-            callsign = call
-            ssid = 0
-
-        callsign = callsign.upper().ljust(6)[:6]
-        encoded = bytearray([ord(c) << 1 for c in callsign])
-        ssid_byte = 0x60 | ((ssid & 0x0F) << 1)
-
-        # Set H-bit (bit 7) if this digipeater has been used
-        if has_been_used:
-            ssid_byte |= 0x80
-
-        if is_last:
-            ssid_byte |= 0x01
-        encoded.append(ssid_byte)
-        return bytes(encoded)
-
-    frame = bytearray()
-    frame.extend(encode_address(dest, is_last=False))
-    is_last = len(path) == 0
-    frame.extend(encode_address(source, is_last=is_last))
-
-    for i, digi in enumerate(path):
-        is_last = i == len(path) - 1
-        frame.extend(encode_address(digi, is_last=is_last))
-
+    frame = build_ax25_address_field(dest, source, path)
     frame.append(control_byte & 0xFF)
     return bytes(frame)
 

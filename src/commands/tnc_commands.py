@@ -465,12 +465,7 @@ class TNCCommandHandler(CommandHandler):
 
         # Reset adapter state
         if self.ax25:
-            async with self.ax25._tx_lock:
-                self.ax25._tx_queue.clear()
-            self.ax25._ns = 0
-            self.ax25._nr = 0
-            self.ax25._link_established = False
-            self.ax25._pending_connect = None
+            await self.ax25.reset_state()
 
         print_info("TNC connection state reset")
 
@@ -491,12 +486,7 @@ class TNCCommandHandler(CommandHandler):
 
         # Reset adapter state
         if self.ax25:
-            async with self.ax25._tx_lock:
-                self.ax25._tx_queue.clear()
-            self.ax25._ns = 0
-            self.ax25._nr = 0
-            self.ax25._link_established = False
-            self.ax25._pending_connect = None
+            await self.ax25.reset_state()
 
         # Send hardware reset command
         try:
@@ -539,12 +529,7 @@ class TNCCommandHandler(CommandHandler):
 
             # Reset adapter state
             if self.ax25:
-                async with self.ax25._tx_lock:
-                    self.ax25._tx_queue.clear()
-                self.ax25._ns = 0
-                self.ax25._nr = 0
-                self.ax25._link_established = False
-                self.ax25._pending_connect = None
+                await self.ax25.reset_state()
 
                 # Restart TX worker
                 print_debug("Restarting TX worker...", level=4)
