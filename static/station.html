@@ -31,7 +31,23 @@
         <div class="detail-left">
             <section class="detail-section">
                 <h2>Location Map</h2>
-                <div id="station-map" class="detail-map-large"></div>
+                <div class="map-wrapper">
+                    <div id="station-map" class="detail-map-large"></div>
+                    <div id="path-time-controls" class="path-overlay-controls" style="display:none">
+                        <label for="path-time-filter">Period:</label>
+                        <select id="path-time-filter" class="filter-select">
+                            <option value="1h">Last Hour</option>
+                            <option value="4h">Last 4 Hours</option>
+                            <option value="24h" selected>Last 24 Hours</option>
+                            <option value="all">All Time</option>
+                        </select>
+                        <div class="path-gradient-legend">
+                            <span>older</span>
+                            <div class="legend-gradient-bar"></div>
+                            <span>newer</span>
+                        </div>
+                    </div>
+                </div>
             </section>
 
             <section id="messages-section" class="detail-section">

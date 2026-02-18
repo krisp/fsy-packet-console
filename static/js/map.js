@@ -946,57 +946,56 @@ export class APRSMap {
                 new Date(a.timestamp) - new Date(b.timestamp)
             );
 
-            // Extract lat/lng points for polyline
+            // Extract lat/lng points for path summary popup
             const pathPoints = sortedPositions.map(p => [p.latitude, p.longitude]);
-
-            // Draw path as polyline
-            const pathLine = L.polyline(pathPoints, {
-                color: '#00aaff',
-                weight: 3,
-                opacity: 0.7,
-                smoothFactor: 1
-            });
-
-            // Add popup to path showing summary
+            const n = sortedPositions.length;
             const firstTime = new Date(sortedPositions[0].timestamp);
-            const lastTime = new Date(sortedPositions[sortedPositions.length - 1].timestamp);
+            const lastTime = new Date(sortedPositions[n - 1].timestamp);
             const timeSpan = ((lastTime - firstTime) / (1000 * 60 * 60)).toFixed(1); // hours
 
-            pathLine.bindPopup(`
-                <div class="path-popup">
-                    <strong>${escapeHtml(callsign)} Movement Path</strong><br>
-                    <small>Positions: ${validPositions.length}</small><br>
-                    <small>Time span: ${timeSpan} hours</small><br>
-                    <small>Oldest: ${firstTime.toLocaleString()}</small><br>
-                    <small>Newest: ${lastTime.toLocaleString()}</small><br>
-                    <small style="color: #ffa500;">Click station again to hide</small>
-                </div>
-            `);
-            pathLine.addTo(this.stationPathLayer);
+            // Draw gradient-colored segments (old = dark blue → new = bright cyan)
+            for (let i = 0; i < n - 1; i++) {
+                const ratio = n > 2 ? i / (n - 2) : 1;
+                const color = this.interpolateColor('#1a4499', '#00e5ff', ratio);
+                L.polyline(
+                    [[sortedPositions[i].latitude, sortedPositions[i].longitude],
+                     [sortedPositions[i + 1].latitude, sortedPositions[i + 1].longitude]],
+                    { color, weight: 3, opacity: 0.4 + ratio * 0.5, smoothFactor: 1 }
+                ).addTo(this.stationPathLayer);
+            }
 
-            // Add markers for historical positions (except the most recent)
+            // Invisible wide polyline for click-to-popup on the full path
+            L.polyline(pathPoints, { color: '#000', weight: 10, opacity: 0.001 })
+                .bindPopup(`
+                    <div class="path-popup">
+                        <strong>${escapeHtml(callsign)} Movement Path</strong><br>
+                        <small>Positions: ${validPositions.length}</small><br>
+                        <small>Time span: ${timeSpan} hours</small><br>
+                        <small>Oldest: ${firstTime.toLocaleString()}</small><br>
+                        <small>Newest: ${lastTime.toLocaleString()}</small><br>
+                        <small style="color: #ffa500;">Click station again to hide</small>
+                    </div>
+                `)
+                .addTo(this.stationPathLayer);
+
+            // Add gradient circle markers for historical positions (except the most recent)
             sortedPositions.forEach((pos, index) => {
-                // Skip the most recent position (already shown as main marker)
-                if (index === sortedPositions.length - 1) return;
+                if (index === n - 1) return;
 
-                // Calculate opacity based on age (older = more transparent)
-                const opacity = 0.3 + (index / sortedPositions.length) * 0.5;
+                const ratio = n > 2 ? index / (n - 2) : 0;
+                const color = this.interpolateColor('#1a4499', '#00e5ff', ratio);
+                const fillOpacity = 0.3 + ratio * 0.5;
+                const timeStr = new Date(pos.timestamp).toLocaleString();
+                const age = Math.round((lastTime - new Date(pos.timestamp)) / (1000 * 60));
 
-                // Create small marker for historical position
-                const historicalMarker = L.circleMarker([pos.latitude, pos.longitude], {
+                L.circleMarker([pos.latitude, pos.longitude], {
                     radius: 4,
-                    fillColor: '#00aaff',
+                    fillColor: color,
                     color: '#fff',
                     weight: 1,
-                    opacity: opacity + 0.2,
-                    fillOpacity: opacity
-                });
-
-                // Add popup with timestamp and position info
-                const timeStr = new Date(pos.timestamp).toLocaleString();
-                const age = ((lastTime - new Date(pos.timestamp)) / (1000 * 60)).toFixed(0); // minutes ago
-
-                historicalMarker.bindPopup(`
+                    opacity: Math.min(fillOpacity + 0.2, 1.0),
+                    fillOpacity
+                }).bindPopup(`
                     <div class="path-popup">
                         <strong>${escapeHtml(callsign)}</strong><br>
                         <small>${timeStr}</small><br>
@@ -1004,9 +1003,7 @@ export class APRSMap {
                         <small>${pos.latitude.toFixed(6)}, ${pos.longitude.toFixed(6)}</small>
                         ${pos.grid_square ? `<br><small>Grid: ${escapeHtml(pos.grid_square)}</small>` : ''}
                     </div>
-                `);
-
-                historicalMarker.addTo(this.stationPathLayer);
+                `).addTo(this.stationPathLayer);
             });
 
             console.log(`Showing path for ${callsign} with ${validPositions.length} positions`);
@@ -1156,32 +1153,56 @@ export class APRSMap {
             new Date(a.timestamp) - new Date(b.timestamp)
         );
 
-        // Extract lat/lng points for polyline
+        // Extract lat/lng points for path summary popup
         const pathPoints = sortedPositions.map(p => [p.latitude, p.longitude]);
-
-        // Draw path as polyline (Optimization #3: Path Simplification)
-        const pathLine = L.polyline(pathPoints, {
-            color: '#00aaff',
-            weight: 2,
-            opacity: 0.5,
-            smoothFactor: 3.0  // Increased from 1.0 for better performance
-        });
-
-        // Add popup to path showing summary
+        const n = sortedPositions.length;
         const firstTime = new Date(sortedPositions[0].timestamp);
-        const lastTime = new Date(sortedPositions[sortedPositions.length - 1].timestamp);
+        const lastTime = new Date(sortedPositions[n - 1].timestamp);
         const timeSpan = ((lastTime - firstTime) / (1000 * 60 * 60)).toFixed(1); // hours
 
-        pathLine.bindPopup(`
-            <div class="path-popup">
-                <strong>${escapeHtml(callsign)} Movement Path</strong><br>
-                <small>Positions: ${validPositions.length}</small><br>
-                <small>Time span: ${timeSpan} hours</small>
-            </div>
-        `);
-        pathLine.addTo(this.allPathsLayer);
+        // Draw gradient-colored segments (Optimization #3: smoothFactor for performance)
+        for (let i = 0; i < n - 1; i++) {
+            const ratio = n > 2 ? i / (n - 2) : 1;
+            const color = this.interpolateColor('#1a4499', '#00e5ff', ratio);
+            L.polyline(
+                [[sortedPositions[i].latitude, sortedPositions[i].longitude],
+                 [sortedPositions[i + 1].latitude, sortedPositions[i + 1].longitude]],
+                { color, weight: 2, opacity: 0.3 + ratio * 0.5, smoothFactor: 3.0 }
+            ).addTo(this.allPathsLayer);
+        }
+
+        // Invisible wide polyline for click-to-popup
+        L.polyline(pathPoints, { color: '#000', weight: 10, opacity: 0.001 })
+            .bindPopup(`
+                <div class="path-popup">
+                    <strong>${escapeHtml(callsign)} Movement Path</strong><br>
+                    <small>Positions: ${validPositions.length}</small><br>
+                    <small>Time span: ${timeSpan} hours</small>
+                </div>
+            `)
+            .addTo(this.allPathsLayer);
 
         return true;
+    }
+
+    /**
+     * Interpolate between two hex colors
+     * @param {string} hex1 - Start color hex (e.g. '#1a4499')
+     * @param {string} hex2 - End color hex (e.g. '#00e5ff')
+     * @param {number} ratio - 0.0 (start) to 1.0 (end)
+     * @returns {string} Interpolated hex color
+     */
+    interpolateColor(hex1, hex2, ratio) {
+        const r1 = parseInt(hex1.slice(1, 3), 16);
+        const g1 = parseInt(hex1.slice(3, 5), 16);
+        const b1 = parseInt(hex1.slice(5, 7), 16);
+        const r2 = parseInt(hex2.slice(1, 3), 16);
+        const g2 = parseInt(hex2.slice(3, 5), 16);
+        const b2 = parseInt(hex2.slice(5, 7), 16);
+        const r = Math.round(r1 + (r2 - r1) * ratio);
+        const g = Math.round(g1 + (g2 - g1) * ratio);
+        const b = Math.round(b1 + (b2 - b1) * ratio);
+        return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
     }
 
     /**

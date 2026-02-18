@@ -9,6 +9,127 @@ import { formatRelativeTime, escapeHtml } from './utils.js';
 
 const api = new APRSApi();
 
+const PATH_COLOR_OLD = '#1a4499';
+const PATH_COLOR_NEW = '#00e5ff';
+
+/**
+ * Interpolate between two hex colors
+ * @param {string} hex1 - Start color (e.g. '#1a4499')
+ * @param {string} hex2 - End color (e.g. '#00e5ff')
+ * @param {number} ratio - 0.0 (start) to 1.0 (end)
+ * @returns {string} Interpolated hex color
+ */
+function interpolateColor(hex1, hex2, ratio) {
+    const r1 = parseInt(hex1.slice(1, 3), 16);
+    const g1 = parseInt(hex1.slice(3, 5), 16);
+    const b1 = parseInt(hex1.slice(5, 7), 16);
+    const r2 = parseInt(hex2.slice(1, 3), 16);
+    const g2 = parseInt(hex2.slice(3, 5), 16);
+    const b2 = parseInt(hex2.slice(5, 7), 16);
+    const r = Math.round(r1 + (r2 - r1) * ratio);
+    const g = Math.round(g1 + (g2 - g1) * ratio);
+    const b = Math.round(b1 + (b2 - b1) * ratio);
+    return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+}
+
+/**
+ * Get cutoff Date for a time filter string
+ * @param {string} timeFilter - '1h', '4h', '24h', or 'all'
+ * @returns {Date|null}
+ */
+function getDetailTimeFilterCutoff(timeFilter) {
+    if (!timeFilter || timeFilter === 'all') return null;
+    const hours = { '1h': 1, '4h': 4, '24h': 24 }[timeFilter];
+    return hours ? new Date(Date.now() - hours * 60 * 60 * 1000) : null;
+}
+
+/**
+ * Render station movement path with gradient coloring onto a Leaflet LayerGroup.
+ * Older segments are dark blue, newer segments are bright cyan.
+ * @param {Object} leafletMap - Leaflet map instance
+ * @param {Array} allPositions - Full position history array
+ * @param {string} callsign - Station callsign (for popups)
+ * @param {string} timeFilter - '1h', '4h', '24h', or 'all'
+ * @param {Object} layerGroup - Leaflet LayerGroup to render into
+ * @returns {Object|null} Leaflet LatLngBounds of rendered path, or null if no points
+ */
+function renderStationPath(leafletMap, allPositions, callsign, timeFilter, layerGroup) {
+    layerGroup.clearLayers();
+
+    if (!allPositions || allPositions.length < 2) return null;
+
+    let validPositions = allPositions.filter(p =>
+        !(p.latitude === 0.0 && p.longitude === 0.0)
+    );
+
+    const cutoff = getDetailTimeFilterCutoff(timeFilter);
+    if (cutoff) {
+        validPositions = validPositions.filter(p => new Date(p.timestamp) >= cutoff);
+    }
+
+    if (validPositions.length < 2) return null;
+
+    const sorted = validPositions.slice().sort((a, b) =>
+        new Date(a.timestamp) - new Date(b.timestamp)
+    );
+    const n = sorted.length;
+    const firstTime = new Date(sorted[0].timestamp);
+    const lastTime = new Date(sorted[n - 1].timestamp);
+
+    // Draw gradient-colored polyline segments (old = dark blue → new = bright cyan)
+    for (let i = 0; i < n - 1; i++) {
+        const ratio = n > 2 ? i / (n - 2) : 1;
+        const color = interpolateColor(PATH_COLOR_OLD, PATH_COLOR_NEW, ratio);
+        L.polyline(
+            [[sorted[i].latitude, sorted[i].longitude],
+             [sorted[i + 1].latitude, sorted[i + 1].longitude]],
+            { color, weight: 3, opacity: 0.4 + ratio * 0.5, smoothFactor: 1 }
+        ).addTo(layerGroup);
+    }
+
+    // Add circle markers for each historical position (skip most recent — shown as station marker)
+    sorted.forEach((pos, index) => {
+        if (index === n - 1) return;
+        const ratio = n > 2 ? index / (n - 2) : 0;
+        const color = interpolateColor(PATH_COLOR_OLD, PATH_COLOR_NEW, ratio);
+        const fillOpacity = 0.3 + ratio * 0.5;
+        const ageMin = Math.round((lastTime - new Date(pos.timestamp)) / (1000 * 60));
+        const timeStr = new Date(pos.timestamp).toLocaleString();
+        L.circleMarker([pos.latitude, pos.longitude], {
+            radius: 4,
+            fillColor: color,
+            color: '#fff',
+            weight: 1,
+            opacity: Math.min(fillOpacity + 0.2, 1.0),
+            fillOpacity
+        }).bindPopup(`
+            <div class="path-popup">
+                <strong>${escapeHtml(callsign)}</strong><br>
+                <small>${timeStr}</small><br>
+                <small>${ageMin} minutes ago</small><br>
+                <small>${pos.latitude.toFixed(6)}, ${pos.longitude.toFixed(6)}</small>
+                ${pos.grid_square ? `<br><small>Grid: ${escapeHtml(pos.grid_square)}</small>` : ''}
+            </div>
+        `).addTo(layerGroup);
+    });
+
+    // Invisible wide polyline for click-to-popup on the path summary
+    const timeSpan = ((lastTime - firstTime) / (1000 * 60 * 60)).toFixed(1);
+    L.polyline(sorted.map(p => [p.latitude, p.longitude]), {
+        color: '#000', weight: 10, opacity: 0.001
+    }).bindPopup(`
+        <div class="path-popup">
+            <strong>${escapeHtml(callsign)} Movement Path</strong><br>
+            <small>Positions: ${n}</small><br>
+            <small>Time span: ${timeSpan} hours</small><br>
+            <small>Oldest: ${firstTime.toLocaleString()}</small><br>
+            <small>Newest: ${lastTime.toLocaleString()}</small>
+        </div>
+    `).addTo(layerGroup);
+
+    return L.latLngBounds(sorted.map(p => [p.latitude, p.longitude]));
+}
+
 /**
  * Render station list in sidebar
  * @param {Array} stations - Array of station objects
@@ -201,87 +322,29 @@ export async function loadStationDetail(callsign) {
                 const map = new APRSMap('station-map', { autoSave: false });
                 map.addOrUpdateStation(station);
 
-                // Draw position history path if available
-                if (station.position_history && station.position_history.length > 1) {
-                    console.log(`Drawing path with ${station.position_history.length} positions`);
+                // Set up path rendering with time filter
+                const pathLayer = L.layerGroup().addTo(map.map);
 
-                    // Filter out Null Island positions
-                    const validPositions = station.position_history.filter(p =>
-                        !(p.latitude === 0.0 && p.longitude === 0.0)
+                if (station.has_path && station.position_history) {
+                    document.getElementById('path-time-controls').style.display = '';
+
+                    // Initial render with default 24h filter
+                    const initialBounds = renderStationPath(
+                        map.map, station.position_history, callsign, '24h', pathLayer
                     );
-
-                    if (validPositions.length > 1) {
-                        // Extract lat/lng points for polyline (reverse to oldest->newest order)
-                        const pathPoints = validPositions.reverse().map(p => [p.latitude, p.longitude]);
-
-                        // Draw path as polyline with gradient effect (older = more transparent)
-                        const pathLine = L.polyline(pathPoints, {
-                            color: '#00aaff',
-                            weight: 3,
-                            opacity: 0.7,
-                            smoothFactor: 1
-                        });
-                        pathLine.addTo(map.map);
-
-                        // Add popup to path showing total distance and time span
-                        const firstTime = new Date(validPositions[0].timestamp);
-                        const lastTime = new Date(validPositions[validPositions.length - 1].timestamp);
-                        const timeSpan = ((lastTime - firstTime) / (1000 * 60 * 60)).toFixed(1); // hours
-
-                        pathLine.bindPopup(`
-                            <div class="path-popup">
-                                <strong>${escapeHtml(station.callsign)} Movement Path</strong><br>
-                                <small>Positions: ${validPositions.length}</small><br>
-                                <small>Time span: ${timeSpan} hours</small><br>
-                                <small>Oldest: ${firstTime.toLocaleString()}</small><br>
-                                <small>Newest: ${lastTime.toLocaleString()}</small>
-                            </div>
-                        `);
-
-                        // Add markers for each historical position
-                        validPositions.forEach((pos, index) => {
-                            // Skip the most recent position (already shown as main marker)
-                            if (index === validPositions.length - 1) return;
-
-                            // Calculate opacity based on age (older = more transparent)
-                            const opacity = 0.3 + (index / validPositions.length) * 0.5;
-
-                            // Create small marker for historical position
-                            const historicalMarker = L.circleMarker([pos.latitude, pos.longitude], {
-                                radius: 4,
-                                fillColor: '#00aaff',
-                                color: '#fff',
-                                weight: 1,
-                                opacity: opacity + 0.2,
-                                fillOpacity: opacity
-                            });
-
-                            // Add popup with timestamp and position info
-                            const timeStr = new Date(pos.timestamp).toLocaleString();
-                            const age = ((lastTime - new Date(pos.timestamp)) / (1000 * 60)).toFixed(0); // minutes ago
-
-                            historicalMarker.bindPopup(`
-                                <div class="path-popup">
-                                    <strong>${escapeHtml(station.callsign)}</strong><br>
-                                    <small>${timeStr}</small><br>
-                                    <small>${age} minutes ago</small><br>
-                                    <small>${pos.latitude.toFixed(6)}, ${pos.longitude.toFixed(6)}</small>
-                                    ${pos.grid_square ? `<br><small>Grid: ${escapeHtml(pos.grid_square)}</small>` : ''}
-                                </div>
-                            `);
-
-                            historicalMarker.addTo(map.map);
-                        });
-
-                        // Fit map to show entire path
-                        const bounds = pathLine.getBounds();
-                        map.map.fitBounds(bounds, { padding: [50, 50] });
+                    if (initialBounds) {
+                        map.map.fitBounds(initialBounds.pad(0.1), { padding: [40, 40] });
                     } else {
-                        // Single valid position - center on it
                         map.map.setView([pos.latitude, pos.longitude], 12);
                     }
+
+                    // Re-render path when time filter changes (don't re-fit bounds)
+                    document.getElementById('path-time-filter').addEventListener('change', (e) => {
+                        renderStationPath(
+                            map.map, station.position_history, callsign, e.target.value, pathLayer
+                        );
+                    });
                 } else {
-                    // No history - center on current position
                     map.map.setView([pos.latitude, pos.longitude], 12);
                 }
 
@@ -502,7 +565,7 @@ export async function loadStationDetail(callsign) {
                                     });
 
                                     // Adjust map to show coverage area
-                                    const bounds = circle.getBounds();
+                                    const bounds = polygon.getBounds();
                                     map.map.fitBounds(bounds, { padding: [50, 50] });
                                 }
                             }
