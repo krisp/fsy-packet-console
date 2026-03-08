@@ -459,8 +459,10 @@ async def autosave_monitor(radio):
 async def gps_monitor(radio):
     """Monitor GPS and send beacons when enabled.
 
-    Supervises the GPS polling task and automatically restarts it when needed
-    for auto-recovery from GPS communication failures.
+    Runs in all modes:
+    - BLE mode: polls GPS hardware with auto-recovery, beacons with GPS
+      or MYLOCATION fallback.
+    - Serial/TCP mode: beacons with MYLOCATION only (no GPS hardware).
     """
     # Wait for command processor to be initialized
     while radio.running:
@@ -471,17 +473,15 @@ async def gps_monitor(radio):
     if not radio.running:
         return
 
-    # Run GPS polling task with automatic restart support
+    # Run beacon/GPS task with automatic restart support
     while radio.running:
-        # Run GPS polling and beacon task
         await radio.cmd_processor.gps_poll_and_beacon_task()
 
-        # Check if task exited due to restart request
+        # Check if task exited due to GPS restart request (BLE only)
         if radio.cmd_processor.gps_needs_restart:
             print_debug("GPS monitor: Task restart requested, performing recovery...", level=2)
 
-            # Step 1: Flush stale GPS responses from rx_queue
-            # This clears any error responses that might be stuck in the queue
+            # Flush stale GPS responses from rx_queue
             print_debug("Flushing rx_queue to clear stale GPS responses...", level=2)
             flushed_count = 0
             while not radio.rx_queue.empty():
@@ -494,13 +494,13 @@ async def gps_monitor(radio):
             if flushed_count > 0:
                 print_debug(f"Flushed {flushed_count} stale response(s) from queue", level=2)
 
-            # Step 2: Reset restart flag and failure counter for fresh start
+            # Reset restart flag and failure counter for fresh start
             radio.cmd_processor.gps_needs_restart = False
             radio.cmd_processor.gps_consecutive_failures = 0
 
             print_info("GPS auto-recovery: Task restarted with clean state")
 
-            # Step 3: Wait a moment before restarting to let BLE settle
+            # Wait a moment before restarting to let BLE settle
             await asyncio.sleep(2)
 
             # Loop will restart the task automatically

@@ -112,8 +112,10 @@ class CommandProcessor:
             retry_count = int(self.tnc_config.get("RETRY") or "3")
             retry_fast = int(self.tnc_config.get("RETRY_FAST") or "20")
             retry_slow = int(self.tnc_config.get("RETRY_SLOW") or "600")
-            self.aprs_manager = APRSManager(mycall, max_retries=retry_count,
-                                           retry_fast=retry_fast, retry_slow=retry_slow)
+            self.aprs_manager = APRSManager(
+                mycall, max_retries=retry_count,
+                retry_fast=retry_fast, retry_slow=retry_slow
+            )
             # Attach to radio so tnc_monitor() can access it
             self.radio.aprs_manager = self.aprs_manager
 
@@ -586,7 +588,6 @@ class CommandProcessor:
         print_pt(HTML(f"<b>AGWPE Bridge:</b> Port {agwpe_port}"))
         print_pt(HTML(f"<b>Web UI:</b> Port {webui_port}"))
         print_pt("")
-
 
     async def cmd_quit(self, args):
         """Quit the application."""
@@ -1134,8 +1135,6 @@ class CommandProcessor:
                 return
 
             # No AX25 adapter — continue with UI fallback behavior
-
-
             frame = build_ui_kiss_frame(
                 source=mycall,
                 dest=callsign,
@@ -1175,8 +1174,6 @@ class CommandProcessor:
                 print_info(f"*** LINK TEARDOWN requested for {callsign}")
             else:
                 # Send disconnect message as UI fallback
-    
-
                 frame = build_ui_kiss_frame(
                     source=mycall,
                     dest=callsign,
@@ -1223,8 +1220,6 @@ class CommandProcessor:
                 path = [p.strip() for p in " ".join(parts[2:]).split(",")]
 
             try:
-    
-
                 payload = (text + "\r").encode("ascii", errors="replace")
                 kiss_frame = build_ui_kiss_frame(mycall, dest, path, payload)
                 await self.radio.send_tnc_data(kiss_frame)
@@ -1255,8 +1250,6 @@ class CommandProcessor:
                         mycall, self.tnc_connected_to, [], payload
                     )
                 else:
-        
-
                     kiss_frame = build_ui_kiss_frame(
                         mycall, self.tnc_connected_to, [], payload
                     )
@@ -1362,84 +1355,75 @@ class CommandProcessor:
             )
 
     async def gps_poll_and_beacon_task(self):
-        """Background task to poll GPS and send beacons when enabled."""
+        """Background task to poll GPS and send beacons when enabled.
+
+        In BLE mode: polls GPS hardware and beacons with GPS or MYLOCATION.
+        In serial/TCP mode: beacons with MYLOCATION only (no GPS hardware).
+        """
 
         while self.radio.running and not self.gps_needs_restart:
             try:
-                # Poll GPS every 5 seconds
+                # Poll every 5 seconds
                 await asyncio.sleep(5)
 
-                # Check GPS lock
-                gps_locked = await self.radio.check_gps_lock()
+                position = None
 
-                # Try getting position anyway (for debugging - lock check may be inaccurate)
-                position = await self.radio.get_gps_position()
+                # Poll GPS only if BLE is available
+                if self.radio.client:
+                    gps_locked = await self.radio.check_gps_lock()
+                    position = await self.radio.get_gps_position()
 
-                if position:
-                    # We got valid position data - update lock status
-                    self.gps_position = position
-                    self.gps_locked = True  # Override lock check if we got valid data
-                    self.gps_consecutive_failures = 0  # Reset failure counter on success
-                    print_debug(f"GPS: {position['latitude']:.6f}, {position['longitude']:.6f} (lock_check={gps_locked})", level=6)
+                    if position:
+                        self.gps_position = position
+                        self.gps_locked = True
+                        self.gps_consecutive_failures = 0
+                        print_debug(f"GPS: {position['latitude']:.6f}, {position['longitude']:.6f} (lock_check={gps_locked})", level=6)
 
-                    # Broadcast position update to web clients
-                    if self.aprs_manager._web_broadcast:
-                        await self.aprs_manager._web_broadcast('gps_update', {
-                            'latitude': position['latitude'],
-                            'longitude': position['longitude'],
-                            'altitude': position.get('altitude'),
-                            'locked': True
-                        })
+                        # Broadcast position update to web clients
+                        if self.aprs_manager._web_broadcast:
+                            await self.aprs_manager._web_broadcast('gps_update', {
+                                'latitude': position['latitude'],
+                                'longitude': position['longitude'],
+                                'altitude': position.get('altitude'),
+                                'locked': True
+                            })
+                    else:
+                        self.gps_position = None
+                        self.gps_locked = False
+                        self.gps_consecutive_failures += 1
+                        print_debug(f"GPS: No position data (lock_check={gps_locked}, failures={self.gps_consecutive_failures})", level=6)
 
-                    # Check if beacon is enabled and due
-                    if self.tnc_config.get("BEACON") == "ON":
-                        beacon_interval = int(self.tnc_config.get("BEACON_INTERVAL") or "10")
+                # Check if beacon is enabled and due
+                if self.tnc_config.get("BEACON") == "ON":
+                    beacon_interval = int(
+                        self.tnc_config.get("BEACON_INTERVAL") or "10"
+                    )
+                    now = datetime.now(timezone.utc)
+                    should_beacon = False
 
-                        # Check if it's time to beacon
-                        now = datetime.now(timezone.utc)
-                        should_beacon = False
+                    if self.last_beacon_time is None:
+                        should_beacon = True  # First beacon
+                    else:
+                        elapsed = (now - self.last_beacon_time).total_seconds()
+                        if elapsed >= (beacon_interval * 60):
+                            should_beacon = True
 
-                        if self.last_beacon_time is None:
-                            should_beacon = True  # First beacon
-                        else:
-                            elapsed = (now - self.last_beacon_time).total_seconds()
-                            if elapsed >= (beacon_interval * 60):
-                                should_beacon = True
-
-                        if should_beacon:
+                    if should_beacon:
+                        if position:
                             await self._send_position_beacon(position)
-                else:
-                    # No GPS position data
-                    self.gps_position = None
-                    self.gps_locked = False
-                    self.gps_consecutive_failures += 1
-                    print_debug(f"GPS: No position data (lock_check={gps_locked}, failures={self.gps_consecutive_failures})", level=6)
+                        elif self.tnc_config.get("MYLOCATION"):
+                            await self._send_position_beacon(None)
 
-                    # Auto-recovery: Restart GPS task after 3 consecutive failures
-                    # This recovers from GPS getting stuck returning error responses
-                    if self.gps_consecutive_failures == 3:
-                        print_warning("GPS auto-recovery: Restarting GPS task after 3 consecutive failures")
-                        self.gps_needs_restart = True
-                        # Break out of GPS polling loop - gps_monitor will restart us
-                        break
-
-                    # Check if beacon is enabled with manual location (MYLOCATION)
-                    if self.tnc_config.get("BEACON") == "ON" and self.tnc_config.get("MYLOCATION"):
-                        beacon_interval = int(self.tnc_config.get("BEACON_INTERVAL") or "10")
-
-                        # Check if it's time to beacon
-                        now = datetime.now(timezone.utc)
-                        should_beacon = False
-
-                        if self.last_beacon_time is None:
-                            should_beacon = True  # First beacon
-                        else:
-                            elapsed = (now - self.last_beacon_time).total_seconds()
-                            if elapsed >= (beacon_interval * 60):
-                                should_beacon = True
-
-                        if should_beacon:
-                            await self._send_position_beacon(None)  # Use MYLOCATION
+                # Auto-recovery: Restart GPS after 3 consecutive failures
+                # (BLE only - serial/TCP mode has no GPS to recover)
+                if (self.radio.client
+                        and self.gps_consecutive_failures >= 3):
+                    print_warning(
+                        "GPS auto-recovery: Restarting GPS task "
+                        "after 3 consecutive failures"
+                    )
+                    self.gps_needs_restart = True
+                    break
 
             except Exception as e:
                 print_error(f"GPS poll task error: {e}")
@@ -1581,8 +1565,8 @@ class CommandProcessor:
                     symbol_code = "_"  # Use weather symbol
 
             # Build position report (! = position without timestamp)
-            # Format: !DDMM.HHN/DDDMM.HHW_WEATHER/A=ALTCOMMENT
-            info = f"!{lat_str}/{lon_str}{symbol_code}"
+            # Format: !DDMM.HHN<table>DDDMM.HHW<code>/A=ALTCOMMENT
+            info = f"!{lat_str}{symbol_table}{lon_str}{symbol_code}"
 
             # Add weather data if available
             if wx_string:
@@ -1671,4 +1655,3 @@ class CommandProcessor:
 
         except Exception as e:
             print_error(f"Failed to send APRS ACK: {e}")
-

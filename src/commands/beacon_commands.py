@@ -63,9 +63,12 @@ class BeaconCommandHandler(CommandHandler):
             else:
                 print_pt(f"  Last beacon: never")
 
+            mylocation = self.tnc_config.get("MYLOCATION")
             if self.cmd_processor.gps_locked and self.cmd_processor.gps_position:
                 pos = self.cmd_processor.gps_position
                 print_pt(f"  GPS: {pos['latitude']:.6f}, {pos['longitude']:.6f} (LOCKED)")
+            elif mylocation:
+                print_pt(f"  GPS: N/A (using MYLOCATION: {mylocation})")
             else:
                 print_pt(f"  GPS: NO LOCK")
             return

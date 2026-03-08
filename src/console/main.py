@@ -466,10 +466,13 @@ async def main(auto_tnc=False, auto_connect=None, auto_debug=False,
             asyncio.create_task(autosave_monitor(radio)),
         ]
 
-        # Add BLE-only monitors (GPS, connection, heartbeat)
+        # Beacon/GPS monitor runs in all modes
+        # (GPS polling in BLE, MYLOCATION-only in serial/TCP)
+        background_tasks.append(asyncio.create_task(gps_monitor(radio)))
+
+        # Add BLE-only monitors (connection, heartbeat)
         if not serial_port and not tcp_host:
             background_tasks.extend([
-                asyncio.create_task(gps_monitor(radio)),  # GPS only available in BLE mode
                 asyncio.create_task(connection_watcher(radio)),
                 asyncio.create_task(heartbeat_monitor(radio)),
             ])
