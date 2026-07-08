@@ -13,7 +13,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 
 from src import constants
-from src.aprs_manager import APRSManager
+from src.aprs import APRSManager
 from src.ax25_adapter import AX25Adapter
 from src.constants import (
     RADIO_INDICATE_UUID,

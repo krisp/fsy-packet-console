@@ -305,6 +305,31 @@ class TNCCommandHandler(CommandHandler):
         except ValueError:
             print_error("RETRY_SLOW must be a number")
 
+    @command("DB_EXPIRE",
+             help_text="Expire database entries older than N days (0=disabled)",
+             usage="DB_EXPIRE <days>",
+             category="aprs")
+    async def db_expire(self, args):
+        """Set automatic station database expiry in days (0 disables)."""
+        if not args:
+            days = self.tnc_config.get("DB_EXPIRE") or "0"
+            if days == "0":
+                print_pt("DB_EXPIRE: 0 (disabled)")
+            else:
+                print_pt(f"DB_EXPIRE: {days} days")
+            print_pt("")
+            print_pt("Stations and messages not heard for this many days")
+            print_pt("are removed automatically (checked every auto-save).")
+            return
+
+        if not self.tnc_config.set("DB_EXPIRE", args[0]):
+            return
+        days = self.tnc_config.get("DB_EXPIRE")
+        if days == "0":
+            print_info("Database expiry disabled")
+        else:
+            print_info(f"Database entries will expire after {days} days")
+
     @command("DEBUG_BUFFER",
              help_text="Frame buffer debugging control",
              usage="DEBUG_BUFFER [ON|OFF|SIZE <mb>|DUMP|CLEAR|LIST]",

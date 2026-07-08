@@ -11,8 +11,30 @@ Defines all the core data structures used throughout the APRS tracking system:
 """
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
+
+
+def ensure_utc_aware(dt: Optional[datetime]) -> Optional[datetime]:
+    """Convert naive datetime to UTC-aware datetime.
+
+    Args:
+        dt: Datetime object (may be naive or timezone-aware)
+
+    Returns:
+        UTC-aware datetime, or None if input is None
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        # Naive datetime - assume UTC
+        return dt.replace(tzinfo=timezone.utc)
+    elif dt.tzinfo != timezone.utc:
+        # Different timezone - convert to UTC
+        return dt.astimezone(timezone.utc)
+    else:
+        # Already UTC-aware
+        return dt
 
 
 @dataclass

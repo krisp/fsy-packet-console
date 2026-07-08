@@ -420,6 +420,41 @@ async def heartbeat_monitor(radio):
             print_error(f"Heartbeat monitor error: {e}")
 
 
+def expire_database_entries(radio):
+    """Prune APRS database entries older than the DB_EXPIRE setting.
+
+    Reads DB_EXPIRE (days) from the TNC config; 0 or invalid disables expiry.
+
+    Returns:
+        Tuple of (stations_pruned, messages_pruned)
+    """
+    if not (hasattr(radio, 'aprs_manager') and radio.aprs_manager):
+        return (0, 0)
+    if not (hasattr(radio, 'cmd_processor') and radio.cmd_processor):
+        return (0, 0)
+
+    try:
+        expire_days = int(
+            radio.cmd_processor.tnc_config.get("DB_EXPIRE") or "0"
+        )
+    except (ValueError, AttributeError):
+        expire_days = 0
+
+    if expire_days <= 0:
+        return (0, 0)
+
+    stations_pruned, messages_pruned = radio.aprs_manager.prune_database(
+        expire_days
+    )
+    if stations_pruned or messages_pruned:
+        print_debug(
+            f"DB_EXPIRE: removed {stations_pruned} station(s) and "
+            f"{messages_pruned} message(s) older than {expire_days} days",
+            level=2,
+        )
+    return (stations_pruned, messages_pruned)
+
+
 async def autosave_monitor(radio):
     """Periodic auto-save of APRS database and frame buffer every 2 minutes.
 
@@ -433,6 +468,9 @@ async def autosave_monitor(radio):
 
             if not radio.running:
                 break
+
+            # Expire old entries before saving so the save reflects the prune
+            expire_database_entries(radio)
 
             # Save both database and frame buffer asynchronously (non-blocking)
             save_tasks = []

@@ -5,6 +5,9 @@ omit =
     */venv/*
     */__pycache__/*
     */audio/*
+    # Transient synthetic migration files created/removed by
+    # tests/unit/test_migration_system.py::synthetic_migrations
+    */src/migrations/m9[0-9][0-9]_synthetic_*.py
 
 [report]
 exclude_lines =

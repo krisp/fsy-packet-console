@@ -41,6 +41,7 @@ class TNCConfig:
             "RETRY_FAST": "20",  # Fast retry timeout (seconds) for non-digipeated messages
             "RETRY_SLOW": "600",  # Slow retry timeout (seconds) for digipeated but not ACKed - 10 minutes
             "AUTO_ACK": "ON",  # Automatic ACK for APRS messages with IDs
+            "DB_EXPIRE": "0",  # Expire station database entries older than N days (0 = disabled)
             "BEACON": "OFF",
             "BEACON_INTERVAL": "10",
             "BEACON_PATH": "WIDE1-1",
@@ -132,6 +133,23 @@ class TNCConfig:
                     value = str(port)
                 except ValueError:
                     print_error(f"Invalid port '{value}': must be a number")
+                    return False
+
+            # Validate database expiry days
+            if key == "DB_EXPIRE":
+                try:
+                    days = int(value)
+                    if not (0 <= days <= 3650):
+                        print_error(
+                            f"Invalid DB_EXPIRE '{value}': "
+                            f"must be 0-3650 days (0 = disabled)"
+                        )
+                        return False
+                    value = str(days)
+                except ValueError:
+                    print_error(
+                        f"Invalid DB_EXPIRE '{value}': must be a number of days"
+                    )
                     return False
 
             # Validate weather station backend

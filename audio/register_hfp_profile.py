@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 """
+DEPRECATED: non-functional — pydbus does not support D-Bus service
+publishing well (see audio/README.md). Use register_hfp_dbus.py instead.
+Kept for reference only.
+
 Register HFP (Handsfree Profile) with BlueZ to enable audio support.
 
 This advertises audio capabilities to the UV-50PRO radio, enabling

@@ -16,7 +16,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import patch_stdout
 
 from src import constants
-from src.aprs_manager import APRSManager
+from src.aprs import APRSManager
 from src.aprs.geo_utils import maidenhead_to_latlon
 from src.ax25_adapter import AX25Adapter, build_ui_kiss_frame
 from src.commands.tnc_commands import TNCCommandHandler

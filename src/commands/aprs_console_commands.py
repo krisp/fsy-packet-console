@@ -619,10 +619,15 @@ class APRSConsoleCommandHandler(CommandHandler):
             return
 
         print_info(f"Pruning entries older than {days} days...")
-        count = self.aprs_manager.prune_database(days)
+        stations_pruned, messages_pruned = self.aprs_manager.prune_database(
+            days
+        )
 
-        if count > 0:
-            print_info(f"✓ Removed {count} old station(s)")
+        if stations_pruned or messages_pruned:
+            print_info(
+                f"✓ Removed {stations_pruned} old station(s) and "
+                f"{messages_pruned} old message(s)"
+            )
             # Auto-save after pruning
             saved = self.aprs_manager.save_database()
             if saved > 0:

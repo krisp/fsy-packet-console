@@ -19,6 +19,7 @@ from .monitors import (
     tnc_monitor,
     heartbeat_monitor,
     autosave_monitor,
+    expire_database_entries,
     message_retry_monitor,
     connection_watcher,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "tnc_monitor",
     "heartbeat_monitor",
     "autosave_monitor",
+    "expire_database_entries",
     "message_retry_monitor",
     "connection_watcher",
     "command_loop",

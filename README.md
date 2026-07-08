@@ -502,6 +502,7 @@ All settings saved to `~/.tnc_config.json` and persist across sessions.
 - `AUTO_ACK` - Automatic APRS message ACK (ON/OFF)
 - `BEACON` - Enable position beaconing (ON/OFF)
 - `BEACON_INTERVAL` - Beacon interval in minutes
+- `DB_EXPIRE` - Auto-expire database entries older than N days (0 = disabled)
 - `DEBUG_BUFFER` - Frame buffer size in MB (or "OFF")
 
 ---
@@ -941,6 +942,35 @@ All data stored in user's home directory:
 - **Frame History:** In-memory with configurable buffer (default: 10MB)
 
 **Auto-migration** from legacy locations on first run.
+
+### Database Expiry & Pruning
+
+The station database grows as stations are heard. Two mechanisms keep it
+trimmed:
+
+**Automatic expiry** — set the `DB_EXPIRE` TNC parameter to the number of
+days to keep entries. Stations and messages not heard for longer than that
+are removed automatically on every auto-save cycle (every 2 minutes):
+
+```bash
+# Switch to TNC mode first
+aprs> tnc
+
+tnc> db_expire 30                  # Expire entries older than 30 days
+tnc> db_expire 0                   # Disable automatic expiry (default)
+tnc> db_expire                     # Show current setting
+```
+
+Accepted range is 0-3650 days. The setting persists in `~/.tnc_config.json`.
+
+**Manual pruning** — one-off cleanup from APRS mode:
+
+```bash
+aprs> aprs database prune 30       # Remove entries older than 30 days
+```
+
+Both report how many stations and messages were removed, and the database
+is saved afterward so the prune takes effect immediately on disk.
 
 ---
 

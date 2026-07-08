@@ -9,7 +9,11 @@ The structure is:
 - weather_forecast.py: Weather forecasting (Zambretti algorithm)
 - formatters.py: Display formatting for APRS data
 - duplicate_detector.py: Packet deduplication logic
-- manager.py: Main APRSManager for station tracking
+- parser.py: APRSParserMixin - packet parsing (positions, messages,
+  weather, MIC-E, telemetry)
+- database.py: APRSDatabaseMixin - persistence (save/load, GZIP/ujson,
+  legacy fallback)
+- manager.py: Main APRSManager (composes the mixins) for station tracking
 """
 
 # Re-export all public classes and functions for backwards compatibility
@@ -25,7 +29,6 @@ from .formatters import APRSFormatters
 from .duplicate_detector import DuplicateDetector
 from .digipeater_stats import DigipeaterActivity, DigipeaterStats
 
-# Import manager when available (will be added after refactoring)
 try:
     from .manager import APRSManager
 except ImportError:

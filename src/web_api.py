@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 from aiohttp import web
 
 from .utils import print_warning, print_error as log_error
-from .aprs_manager import APRSManager
+from .aprs import APRSManager
 from .aprs.models import (
     APRSMessage,
     APRSPosition,

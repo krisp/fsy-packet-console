@@ -15,8 +15,8 @@
 /**
  * Format a timestamp as relative time (e.g. "5m ago", "2h ago").
  *
- * This is the canonical implementation — replaces copies in
- * map.js, charts.js, and stations-table.js.
+ * This is the canonical implementation — replaces copies that
+ * previously lived in map.js and stations-table.js.
  *
  * @param {string|Date} timestamp - ISO timestamp string or Date object
  * @returns {string} Formatted relative time string
